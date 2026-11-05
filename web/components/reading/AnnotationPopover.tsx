@@ -127,20 +127,89 @@ export function AnnotationPopover({
     if (isMobile) return
     const element = ref.current
     if (!element) return
-    const box = element.getBoundingClientRect()
-    const margin = 10
-    // Prefer above the selection; flip below when there is no room up there.
-    let top = anchor.y - box.height - margin
-    if (top < margin) top = anchor.y + 24
-    const left = Math.min(
-      Math.max(margin, anchor.x - box.width / 2),
-      window.innerWidth - box.width - margin
-    )
-    setPosition({
-      left,
-      top: Math.min(top, window.innerHeight - box.height - margin),
-    })
-  }, [anchor.x, anchor.y, isMobile, noteOpen, overflowOpen])
+
+    const place = () => {
+      const box = element.getBoundingClientRect()
+      const gap = 10
+      const margin = 10
+
+      // The selection is a line of text, not a point, so place against the
+      // whole line: sitting the toolbar a fixed distance above a single anchor
+      // put it squarely over the paragraph someone had just selected from.
+      // The live selection is the most accurate source; fall back to a nominal
+      // line box when the DOM selection is unavailable (tests, some engines).
+      // `getBoundingClientRect` on a Range is absent in jsdom and in a few
+      // older engines, so probe for it rather than assuming the API exists.
+      const sel = window.getSelection()
+      let selectedRect: { top: number; bottom: number; height: number } | null = null
+      if (sel?.rangeCount) {
+        const range = sel.getRangeAt(0) as Range & {
+          getBoundingClientRect?: () => DOMRect
+        }
+        if (typeof range.getBoundingClientRect === 'function') {
+          selectedRect = range.getBoundingClientRect()
+        }
+      }
+      let lineTop: number
+      let lineBottom: number
+      if (selectedRect && selectedRect.height > 0) {
+        lineTop = selectedRect.top
+        lineBottom = selectedRect.bottom
+      } else {
+        const lineHeight = 28
+        lineTop = anchor.y - lineHeight
+        lineBottom = anchor.y
+      }
+
+      // Prefer above the line, drop below when there is no room there. Below is
+      // also the better choice when "above" would cover text the reader is
+      // looking at, which is every case where the selection is mid-paragraph.
+      const roomAbove = lineTop - gap - margin
+      const roomBelow = window.innerHeight - lineBottom - gap - margin
+      let top: number
+      if (roomAbove >= box.height) {
+        top = lineTop - gap - box.height
+      } else if (roomBelow >= box.height) {
+        top = lineBottom + gap
+      } else {
+        // Neither side fits: pin to the roomier one and let it clamp below.
+        top = roomAbove > roomBelow ? lineTop - gap - box.height : lineBottom + gap
+      }
+
+      const left = Math.min(
+        Math.max(margin, anchor.x - box.width / 2),
+        window.innerWidth - box.width - margin
+      )
+      setPosition({
+        left,
+        top: Math.min(Math.max(margin, top), window.innerHeight - box.height - margin),
+      })
+    }
+
+    place()
+
+    // The toolbar is `position: fixed`, so without this it stays pinned to the
+    // viewport while the page scrolls underneath it — the box ends up over
+    // unrelated text and the selection it belongs to is somewhere else.
+    // Scrolling is treated as a dismissal: the selection is no longer reliable
+    // at that point, and keeping a floating toolbar for a line you can no longer
+    // see is worse than asking for it again.
+    // Dismiss on the first scroll event rather than deferring to the next
+    // animation frame: `requestAnimationFrame` does not run in a background tab,
+    // so a rAF-deferred dismissal would silently never happen there.
+    let dismissed = false
+    const onScroll = () => {
+      if (dismissed) return
+      dismissed = true
+      onDismiss()
+    }
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [anchor.x, anchor.y, isMobile, noteOpen, overflowOpen, onDismiss])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

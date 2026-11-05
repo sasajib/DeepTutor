@@ -147,3 +147,46 @@ describe("selection panel above 768px (desktop regression)", () => {
     expect(screen.getByRole("button", { name: "Ask about this" })).toBeVisible();
   });
 });
+
+/**
+ * The desktop popover is `position: fixed`, so without a scroll handler it stays
+ * pinned to the viewport while the page moves under it — the box ends up over
+ * unrelated text and the line it belongs to drifts away. Scrolling dismisses it
+ * instead: re-anchoring a toolbar to a selection the reader can no longer see is
+ * worse than asking for it again.
+ */
+describe("selection panel while the page moves (desktop)", () => {
+  beforeEach(() => {
+    device.isMobile = false;
+  });
+
+  it("dismisses when the reader scrolls", async () => {
+    const { onDismiss } = renderPopover();
+    expect(screen.getByRole("dialog", { name: "Annotate selection" })).toBeTruthy();
+
+    fireEvent.scroll(window);
+
+    await vi.waitFor(() => expect(onDismiss).toHaveBeenCalled());
+  });
+
+  it("stays put when nothing moves", async () => {
+    vi.useFakeTimers();
+    try {
+      const { onDismiss } = renderPopover();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(onDismiss).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a note editor open across a re-render", () => {
+    const { rerender } = renderPopover();
+    const dialog = screen.getByRole("dialog", { name: "Annotate selection" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add note" }));
+    expect(within(dialog).getByRole("textbox")).toBeTruthy();
+
+    rerender(<div />);
+    expect(within(dialog).getByRole("textbox")).toBeTruthy();
+  });
+});
