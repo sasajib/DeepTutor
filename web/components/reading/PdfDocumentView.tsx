@@ -30,6 +30,14 @@ import {
   normaliseRects,
 } from "@/lib/reading-selection";
 import { PdfPage } from "./PdfPage";
+import { ReadAlongHighlighter } from "./ReadAlongHighlighter";
+import { useReadingActions } from "./reading-actions-context";
+import {
+  collectSpeakableText,
+  wordIndexForRangeStart,
+  wordIndexFromPoint,
+  type SpeakableText,
+} from "@/lib/reading-speakable-text";
 
 /** Pages kept rendered on each side of the viewport. */
 const RENDER_MARGIN = 1;
@@ -92,6 +100,14 @@ export function PdfDocumentView({
 }: PdfDocumentViewProps) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Read-along state for the page currently on screen. A PDF is one continuous
+  // scroll of lazily-rendered pages, so unlike the text view there is no single
+  // article element: the model is rebuilt from whichever page's text layer is
+  // actually populated, keyed by that page's locator.
+  const sharedActions = useReadingActions();
+  const speakableRef = useRef<SpeakableText | null>(null);
+  const spokenPageRef = useRef<HTMLElement | null>(null);
+  const pageModelRef = useRef<{ locator: number; model: SpeakableText } | null>(null);
   // Loaded document and load error are both tagged with the material they
   // belong to, so switching documents invalidates them by derivation instead of
   // by a synchronous reset inside the effect (which would cascade a render).
@@ -479,7 +495,141 @@ export function PdfDocumentView({
       rects,
       anchor: { x: last.left + last.width / 2, y: last.top },
     });
-  }, [onSelection]);
+
+    // Speak the selection and stop at its end, matching the text view. The
+    // highlight index is relative to this page's words, so the selection has to
+    // say where it starts or word 1 of the quote would paint word 1 of the page.
+    const layer = page.querySelector<HTMLElement>(".textLayer");
+    if (layer) {
+      const model = collectSpeakableText(layer);
+      const base = wordIndexForRangeStart(model, range);
+      pageModelRef.current = { locator, model };
+      speakableRef.current = model;
+      spokenPageRef.current = layer;
+      sharedActions?.speakSelection(quote, base);
+    }
+  }, [onSelection, sharedActions]);
+
+  // -- read-along ----------------------------------------------------------
+  //
+  // The text view hands read-along a single article element. A PDF has none:
+  // pages are canvases with a PDF.js text layer over them, they render lazily,
+  // and only the ones near the viewport have any text at all. So the model is
+  // built from the *visible* page's text layer and rebuilt as the reader
+  // scrolls — which also means the cursor walks page by page rather than over
+  // one long passage.
+
+  /** The page element whose text layer is populated and nearest the viewport. */
+  const visibleTextPage = useCallback((): HTMLElement | null => {
+    const root = scrollRef.current;
+    if (!root) return null;
+    const rootRect = root.getBoundingClientRect();
+    let best: { element: HTMLElement; score: number } | null = null;
+    for (const page of root.querySelectorAll<HTMLElement>("[data-reader-unit]")) {
+      const layer = page.querySelector<HTMLElement>(".textLayer");
+      if (!layer || !layer.textContent?.trim()) continue;
+      const rect = page.getBoundingClientRect();
+      const overlap =
+        Math.min(rect.bottom, rootRect.bottom) - Math.max(rect.top, rootRect.top);
+      if (overlap <= 0) continue;
+      if (!best || overlap > best.score) best = { element: page, score: overlap };
+    }
+    return best?.element ?? null;
+  }, []);
+
+  /** Rebuild the word model from whichever page can currently be read. */
+  const refreshPageModel = useCallback((): number => {
+    const page = visibleTextPage();
+    const layer = page?.querySelector<HTMLElement>(".textLayer");
+    const locator = Number(page?.dataset.readerUnit ?? "0");
+    if (!layer || !locator) {
+      speakableRef.current = null;
+      pageModelRef.current = null;
+      spokenPageRef.current = null;
+      return 0;
+    }
+    if (pageModelRef.current?.locator !== locator) {
+      pageModelRef.current = { locator, model: collectSpeakableText(layer) };
+    }
+    speakableRef.current = pageModelRef.current.model;
+    // The highlighter must enumerate exactly the page the model came from;
+    // every other page's layer is empty, but pointing it at one element keeps
+    // index N meaning the same word in both directions.
+    spokenPageRef.current = layer;
+    return locator;
+  }, [visibleTextPage]);
+
+  // Publish the page to the read-along session. `next` turns to the following
+  // page the same way a scroll or the pager would.
+  useEffect(() => {
+    if (!sharedActions) return;
+    sharedActions.registerReadAlongSource({
+      getPage: () => {
+        refreshPageModel();
+        const model = speakableRef.current;
+        if (!model) return null;
+        return { text: model.text, wordCount: model.words.length };
+      },
+      hasNext: () => (pageModelRef.current?.locator ?? 1) < unitCount,
+      next: () => {
+        const current = pageModelRef.current?.locator ?? 1;
+        const following = Math.min(unitCount, current + 1);
+        const root = scrollRef.current;
+        const target = root?.querySelector<HTMLElement>(
+          `[data-reader-unit="${following}"]`,
+        );
+        target?.scrollIntoView({ block: "start" });
+        pageModelRef.current = null;
+        speakableRef.current = null;
+      },
+    });
+    return () => sharedActions.registerReadAlongSource(null);
+  }, [refreshPageModel, sharedActions, unitCount]);
+
+  // When a page's text layer finishes populating, tell read-along the page is
+  // ready so an in-flight session can continue on it.
+  useEffect(() => {
+    if (!sharedActions?.readAlongActive) return;
+    const root = scrollRef.current;
+    if (!root) return;
+    const observer = new MutationObserver(() => {
+      if (refreshPageModel() && sharedActions.readAlongActive) {
+        sharedActions.continueReadAlong();
+      }
+    });
+    // Text layers are filled in as pages mount, which the observer sees.
+    for (const layer of root.querySelectorAll(".textLayer")) {
+      observer.observe(layer, { childList: true, subtree: true });
+    }
+    return () => observer.disconnect();
+  }, [refreshPageModel, sharedActions]);
+
+  /**
+   * A selection is read verbatim and stops at its end; a plain click sets the
+   * read cursor and runs from there to the end of the document. Same contract as
+   * the text view, so the toolbar behaves identically on both.
+   */
+  const handleClickToRead = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (!sharedActions || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".textLayer")) return;
+
+      // A selection is handled by the mouseup path below, which already reads
+      // it; this is only the cursor case.
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+
+      refreshPageModel();
+      const model = speakableRef.current;
+      if (!model?.words.length) return;
+      const offset = wordIndexFromPoint(model, event.clientX, event.clientY);
+      selection?.removeAllRanges();
+      sharedActions.startReadAlong(Math.max(0, offset));
+    },
+    [refreshPageModel, sharedActions],
+  );
 
   // -- render --------------------------------------------------------------
 
@@ -500,6 +650,7 @@ export function PdfDocumentView({
     <div
       ref={scrollRef}
       onMouseUp={handlePointerUp}
+      onClick={handleClickToRead}
       // The desk the pages lie on. This was `bg-[var(--muted)]/40`, which
       // compiles to nothing here — a var() colour has no channels for the
       // `/NN` modifier to reach into, so the rule was dropped and the desk
@@ -537,6 +688,7 @@ export function PdfDocumentView({
           )}
         </div>
       )}
+      <ReadAlongHighlighter containerRef={spokenPageRef} />
     </div>
   );
 }
