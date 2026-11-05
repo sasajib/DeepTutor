@@ -107,9 +107,25 @@ def align_words_to_text(
 
 
 async def synthesize_with_word_timings(
-    text: str, *, voice: str | None = None, speed: float | None = None
+    text: str,
+    *,
+    voice: str | None = None,
+    speed: float | None = None,
+    strip_markdown: bool = True,
 ) -> dict[str, Any]:
     """Return base64 audio plus per-word timings for ``text``.
+
+    ``strip_markdown`` must stay on for text read out of a reading unit, which is
+    Markdown: a voice pronounces ``###`` literally, and the markers would be
+    counted as words.
+
+    The reader overrides it to ``False``, and that is load-bearing. What it sends
+    is the *rendered* article text, which already has no Markdown — but a list
+    item on screen still begins with its marker (``1.``), and the page's word
+    list includes it. Stripping that text removed the marker from the audio while
+    the page still had a slot for it, so the highlight ran one word ahead of the
+    voice from the first list item onward. The client's text is the coordinate
+    system the highlight indexes against; it must not be rewritten here.
 
     Raises ``VoiceProviderError`` when the configured provider cannot synthesise
     the text at all; a provider that simply has no boundary events is *not* an
@@ -125,7 +141,11 @@ async def synthesize_with_word_timings(
     # describe the audio that was actually produced.
     from deeptutor.services.voice.base import strip_markdown_for_speech
 
-    text = strip_markdown_for_speech(text, math_speak=True).strip()
+    text = (
+        strip_markdown_for_speech(text, math_speak=True).strip()
+        if strip_markdown
+        else text.strip()
+    )
     # A unit that is nothing but markup has nothing to say. `strip_markdown_for_
     # speech` leaves a bare `---` (horizontal rule) behind, so check for leftover
     # unspeakable tokens rather than only testing for an empty string.
@@ -188,11 +208,23 @@ async def synthesize_with_word_timings(
         audio_bytes, kokoro_type, kokoro_words = await synthesize_kokoro_with_timings(
             text, config
         )
+        # Kokoro's timestamps are the *spoken* tokens, which are not the page's
+        # tokens: it splits a list marker into a word and a punctuation mark
+        # ("1." -> "one" + "."), so a unit with three list items yields three
+        # more timings than the page has words. Handing those straight to the
+        # reader made the highlight index into a longer list than the page and
+        # run ahead of the voice. Project them onto the page's own tokens, the
+        # same way the Edge path does.
+        boundaries = [
+            (str(word.get("word", "")), float(word.get("start", 0.0)), float(word.get("duration", 0.0)))
+            for word in kokoro_words
+        ]
+        words = align_words_to_text(text, boundaries)
         return {
             "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
             "mime": kokoro_type,
-            "words": kokoro_words,
-            "timed": bool(kokoro_words),
+            "words": [word.as_dict() for word in words],
+            "timed": bool(words),
         }
 
     # Any other configured provider: plain audio, no timings.

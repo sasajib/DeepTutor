@@ -119,3 +119,105 @@ def test_kokoro_is_a_registered_provider_and_adapter() -> None:
     assert spec.is_local is True
     assert spec.default_voice == "af_heart"
     assert "kokoro" in TTS_ADAPTERS
+
+
+def test_reader_supplied_text_keeps_its_own_word_numbering(monkeypatch) -> None:
+    """The highlight indexes the page's word list, so marker words must survive.
+
+    A rendered list item still starts with "1." and the page counts it as a word.
+    Stripping it server-side removed a slot from the audio's word list while the
+    page kept one, so the highlight ran ahead of the voice from the first list
+    item onward — the exact "reading is behind, highlight is forward" report.
+    """
+    spoken: list[str] = []
+
+    async def fake_synth(text: str, config: TTSConfig):
+        spoken.append(text)
+        return b"x", "audio/mpeg", [{"word": "x", "start": 0.0, "duration": 0.1}]
+
+    monkeypatch.setattr(
+        "deeptutor.services.voice.adapters.kokoro.synthesize_kokoro_with_timings",
+        fake_synth,
+    )
+    monkeypatch.setattr(
+        "deeptutor.services.config.provider_runtime.resolve_tts_runtime_config",
+        lambda: _config(),
+    )
+
+    rendered = "1. The product nobody is looking for"
+    asyncio.run(
+        word_timing.synthesize_with_word_timings(rendered, strip_markdown=False)
+    )
+
+    assert spoken, "nothing was synthesised"
+    # The marker stays, so the token count matches what is on screen.
+    assert spoken[0].split()[0] == "1."
+    assert len(spoken[0].split()) == len(rendered.split())
+
+
+def test_unit_text_is_still_stripped_by_default(monkeypatch) -> None:
+    """Text read from the store is Markdown and must be stripped."""
+    spoken: list[str] = []
+
+    async def fake_synth(text: str, config: TTSConfig):
+        spoken.append(text)
+        return b"x", "audio/mpeg", []
+
+    monkeypatch.setattr(
+        "deeptutor.services.voice.adapters.kokoro.synthesize_kokoro_with_timings",
+        fake_synth,
+    )
+    monkeypatch.setattr(
+        "deeptutor.services.config.provider_runtime.resolve_tts_runtime_config",
+        lambda: _config(),
+    )
+
+    asyncio.run(word_timing.synthesize_with_word_timings("### Heading here"))
+    assert spoken[0].strip() == "Heading here"
+
+
+def test_kokoro_timestamps_are_aligned_to_the_page_not_the_voice(monkeypatch) -> None:
+    """Kokoro's spoken tokens are not the page's tokens.
+
+    It expands a list marker into a word plus punctuation ("1." -> "one" + "."),
+    so the raw timestamp list is *longer* than the page's word list. Returning
+    those directly made the highlight index past the end of the page's words and
+    run ahead of the voice. They must be projected onto the page's own tokens.
+    """
+    rendered = "1. The product nobody is looking for"
+
+    async def fake_synth(text: str, config: TTSConfig):
+        # Spoken tokens: the marker became "one" + ".", so one more than the page.
+        spoken = [
+            ("one", 0.0, 0.2),
+            (".", 0.2, 0.1),
+            ("The", 0.3, 0.2),
+            ("product", 0.5, 0.3),
+            ("nobody", 0.8, 0.3),
+            ("is", 1.1, 0.1),
+            ("looking", 1.2, 0.3),
+            ("for", 1.5, 0.2),
+        ]
+        return b"x", "audio/mpeg", [
+            {"word": word, "start": start, "duration": duration}
+            for word, start, duration in spoken
+        ]
+
+    monkeypatch.setattr(
+        "deeptutor.services.voice.adapters.kokoro.synthesize_kokoro_with_timings",
+        fake_synth,
+    )
+    monkeypatch.setattr(
+        "deeptutor.services.config.provider_runtime.resolve_tts_runtime_config",
+        lambda: _config(),
+    )
+
+    result = asyncio.run(
+        word_timing.synthesize_with_word_timings(rendered, strip_markdown=False)
+    )
+
+    page_tokens = rendered.split()
+    returned = [word["word"] for word in result["words"]]
+    # One timing per word on the page, in the page's order — no extra slots.
+    assert returned == page_tokens
+    assert len(result["words"]) == len(page_tokens)

@@ -240,7 +240,13 @@ async def read_material_aloud_timed(
             status_code=status.HTTP_403_FORBIDDEN, detail="This reading extension is not allowed."
         )
 
+    # Caller-supplied text is the reader's *rendered* article, and its word
+    # numbering is what the highlight indexes against. It already has no
+    # Markdown, but it may still begin a line with a list marker that the page
+    # counts as a word, so it must not be rewritten. Unit text read from the
+    # store below *is* Markdown and does need stripping.
     text = payload.text.strip()
+    from_material = not text
     if not text:
         if payload.locator is None:
             raise HTTPException(
@@ -256,7 +262,10 @@ async def read_material_aloud_timed(
 
     try:
         result = await synthesize_with_word_timings(
-            text, voice=payload.voice, speed=payload.speed
+            text,
+            voice=payload.voice,
+            speed=payload.speed,
+            strip_markdown=from_material,
         )
     except VoiceProviderError as exc:
         logger.warning("Timed TTS provider error for %s: %s", material_id, exc)
