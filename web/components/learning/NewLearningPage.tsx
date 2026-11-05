@@ -1,15 +1,17 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import { ArrowUpRight, Plus, Settings2 } from 'lucide-react'
+import { ArrowUpRight, Plus, Settings2, Upload } from 'lucide-react'
 import { m, useReducedMotion } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { useAuthStatus } from '@/hooks/useAuthStatus'
 import { useModules } from '@/hooks/useModules'
 import { usePageCustomization } from '@/context/PageCustomizationContext'
 import { PageCustomizeButton } from '@/components/customization/PageCustomizeButton'
-import { navigateTask } from '@/lib/workspace-scope'
+import Link from 'next/link'
+import { activeWorkspaceId, navigateTask, scopedUrl } from '@/lib/workspace-scope'
 import { LEARNING_SURFACES } from './surfaces'
+import { READING_MATERIALS } from '@/lib/learning-routes'
 import {
   LearningShell,
   LearningSkeleton,
@@ -100,6 +102,22 @@ export default function NewLearningPage() {
             action={<PageCustomizeButton page="learning" learningKinds={learningKinds} />}
           />
         )
+      )}
+      {!loading && (
+        <Link
+          href={scopedUrl(`${READING_MATERIALS}?create=1`, activeWorkspaceId())}
+          className="mt-4 flex items-center gap-3 rounded-xl border border-dashed border-border px-4 py-3 text-left transition-colors hover:border-primary/40 hover:bg-muted/40"
+        >
+          <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <Upload size={16} strokeWidth={1.7} />
+          </span>
+          <span className="min-w-0">
+            <span className="block text-sm font-medium">{t('navigation.uploadToRead')}</span>
+            <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+              {t('navigation.uploadToReadHint')}
+            </span>
+          </span>
+        </Link>
       )}
       {!loading && (
         <p className="mt-6 text-xs leading-relaxed text-muted-foreground">

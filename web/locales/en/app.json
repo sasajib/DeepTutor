@@ -6406,5 +6406,7 @@
   "Reset learning text": "Reset learning text",
   "language.portuguese": "Portuguese",
   "language.japanese": "Japanese",
-  "language.turkish": "Türkçe"
+  "language.turkish": "Türkçe",
+  "navigation.uploadToRead": "Upload a book or document",
+  "navigation.uploadToReadHint": "PDF, EPUB, Word, slides, audio, video — or paste a link. It opens in Immersive Reading with read-along."
 }
