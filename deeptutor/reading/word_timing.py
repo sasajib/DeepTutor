@@ -117,6 +117,21 @@ async def synthesize_with_word_timings(
     """
     boundaries: list[tuple[str, float, float]] = []
 
+    # Speak prose, not markup. Reading units carry Markdown (``###``, ``**``,
+    # bullet markers), and a voice that does not skip it pronounces the markers:
+    # Kokoro says "number number number" for a heading, and the alignment pass
+    # counts them as words so every later highlight is offset. The timings are
+    # aligned against the *stripped* text for the same reason — they have to
+    # describe the audio that was actually produced.
+    from deeptutor.services.voice.base import strip_markdown_for_speech
+
+    text = strip_markdown_for_speech(text, math_speak=True).strip()
+    # A unit that is nothing but markup has nothing to say. `strip_markdown_for_
+    # speech` leaves a bare `---` (horizontal rule) behind, so check for leftover
+    # unspeakable tokens rather than only testing for an empty string.
+    if not text or all(_UNSPEAKABLE.match(token) for token in text.split()):
+        return {"audio_base64": "", "mime": "audio/mpeg", "words": [], "timed": False}
+
     # Edge is the only built-in adapter that reports WordBoundary events, and it
     # needs ``boundary="WordBoundary"`` to emit them at all.
     from deeptutor.services.config.provider_runtime import resolve_tts_runtime_config
@@ -163,6 +178,22 @@ async def synthesize_with_word_timings(
                     "words": [word.as_dict() for word in words],
                     "timed": bool(words),
                 }
+
+    # Kokoro reports exact word boundaries through its captioned endpoint, so it
+    # gets a real timeline rather than the proportional estimate other providers
+    # fall back to.
+    if provider == "kokoro":
+        from deeptutor.services.voice.adapters.kokoro import synthesize_kokoro_with_timings
+
+        audio_bytes, kokoro_type, kokoro_words = await synthesize_kokoro_with_timings(
+            text, config
+        )
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "mime": kokoro_type,
+            "words": kokoro_words,
+            "timed": bool(kokoro_words),
+        }
 
     # Any other configured provider: plain audio, no timings.
     audio, content_type = await synthesize_speech(text)

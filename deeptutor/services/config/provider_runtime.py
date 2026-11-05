@@ -417,6 +417,17 @@ TTS_PROVIDERS: dict[str, VoiceProviderSpec] = {
         default_api_base="",
         default_model="",
     ),
+    # Kokoro is a local server (Kokoro-FastAPI) that speaks the OpenAI-compatible
+    # /v1/audio/speech shape and adds /dev/captioned_speech for exact word
+    # timings. No API key, so it is marked local.
+    "kokoro": VoiceProviderSpec(
+        label="Kokoro (local server)",
+        default_api_base="http://localhost:8880",
+        adapter="kokoro",
+        default_model="kokoro",
+        default_voice="af_heart",
+        is_local=True,
+    ),
     # Edge's free read-aloud voices via the edge-tts package; no key, no endpoint.
     "edge": VoiceProviderSpec(
         label="Microsoft Edge (free)",

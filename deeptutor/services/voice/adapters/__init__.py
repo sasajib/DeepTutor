@@ -14,6 +14,7 @@ from deeptutor.services.voice.adapters.dashscope import (
 )
 from deeptutor.services.voice.adapters.edge import EdgeTTSAdapter
 from deeptutor.services.voice.adapters.gemini import GeminiTTSAdapter
+from deeptutor.services.voice.adapters.kokoro import KokoroTTSAdapter
 from deeptutor.services.voice.adapters.mimo import MiMoTTSAdapter
 from deeptutor.services.voice.adapters.minimax import MiniMaxTTSAdapter
 from deeptutor.services.voice.adapters.mistral import MistralSTTAdapter, MistralTTSAdapter
@@ -35,6 +36,7 @@ TTS_ADAPTERS: dict[str, BaseTTSAdapter] = {
     "dashscope": DashScopeTTSAdapter(),
     "gemini": GeminiTTSAdapter(),
     "edge": EdgeTTSAdapter(),
+    "kokoro": KokoroTTSAdapter(),
     "mistral_tts": MistralTTSAdapter(),
     "xai_tts": XaiTTSAdapter(),
 }
