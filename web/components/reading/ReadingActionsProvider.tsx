@@ -249,7 +249,7 @@ export function ReadingActionsProvider({
 
   /** Speak a selection once, without arming the cursor. */
   const speakSelection = useCallback(
-    (text: string) => {
+    (text: string, base = 0) => {
       if (!materialId) return;
       const passage = text.trim();
       if (!passage) return;
@@ -262,7 +262,10 @@ export function ReadingActionsProvider({
         fallbackText: passage,
         text: passage,
         timed: true,
-        base: 0,
+        // Index of this selection's first word on the page. The server times the
+        // passage from zero, so without this a selection mid-page highlights
+        // from the top of the page instead of from where it starts.
+        base: Math.max(0, base),
       });
     },
     [i18n.language, locator, materialId, speak],

@@ -64,8 +64,12 @@ export interface ReadingActionsValue {
   readAlongActive: boolean;
   /** Start read-along at a word index, or resume from where it stopped. */
   startReadAlong: (fromWord?: number) => void;
-  /** Speak a selection once and stop (no advancing past it). */
-  speakSelection: (text: string) => void;
+  /**
+   * Speak a selection once and stop (no advancing past it). `base` is the
+   * selection's first word index on the page, so the highlight lands on the
+   * selected words rather than at the top of the document.
+   */
+  speakSelection: (text: string, base?: number) => void;
   /** Toggle the read-along cursor on/off. */
   toggleReadAlong: () => void;
   /** The reader calls this once a newly turned page has rendered. */

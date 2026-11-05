@@ -133,3 +133,68 @@ describe("speakableFrom", () => {
     expect(speakableFrom(model, 99)).toEqual({ text: "", base: 2 });
   });
 });
+
+describe("selection offset on the page (read-along regression)", () => {
+  // The bug: a selection three paragraphs down spoke correctly but highlighted
+  // near the top of the page, because the selection started its timeline at word
+  // zero of the document instead of at the selection's own first word.
+  const LONG = `
+    <h2>Preface</h2>
+    <p>Alpha bravo charlie delta echo foxtrot golf hotel.</p>
+    <p>India juliet kilo lima mike november oscar papa.</p>
+    <p>Quebec romeo sierra tango uniform victor whiskey.</p>
+  `;
+
+  function selectIn(root: HTMLElement, paragraphIndex: number, start: number, end: number) {
+    const paragraphs = [...root.querySelectorAll("p")];
+    const node = paragraphs[paragraphIndex].firstChild as Text;
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, end);
+    return range;
+  }
+
+  it("reports where a mid-page selection starts", () => {
+    const root = article(LONG);
+    const model = collectSpeakableText(root);
+
+    // Heading (1) + first paragraph (8) + second paragraph (8) = 17 words before
+    // the third paragraph.
+    const range = selectIn(root, 2, 0, 12); // "Quebec romeo"
+    const base = wordIndexForRangeStart(model, range);
+
+    expect(base).toBe(17);
+    expect(model.words[base].word).toBe("Quebec");
+  });
+
+  it("points the timeline at the selected words, not the document top", () => {
+    const root = article(LONG);
+    const model = collectSpeakableText(root);
+    const range = selectIn(root, 2, 0, 13); // "Quebec romeo "
+    const base = wordIndexForRangeStart(model, range);
+
+    // What the voice is given, and what the highlight will address.
+    const spoken = speakableFrom(model, base);
+    expect(spoken.base).toBe(17);
+    expect(spoken.text.startsWith("Quebec romeo")).toBe(true);
+
+    // Word 0 of the spoken passage must resolve to "Quebec", not "Preface".
+    expect(rangeForWordIndex(model, spoken.base)?.toString()).toBe("Quebec");
+    expect(rangeForWordIndex(model, spoken.base + 1)?.toString()).toBe("romeo");
+  });
+
+  it("handles a selection that starts on an element boundary", () => {
+    const root = article(LONG);
+    const model = collectSpeakableText(root);
+    const paragraphs = [...root.querySelectorAll("p")];
+    const range = document.createRange();
+    // Start at the paragraph element itself (what a double-click or a
+    // triple-click sometimes produces), not inside its text node.
+    range.setStart(paragraphs[1], 0);
+    range.setEnd(paragraphs[1], 1);
+
+    const base = wordIndexForRangeStart(model, range);
+    expect(base).toBe(9); // heading + first paragraph
+    expect(model.words[base].word).toBe("India");
+  });
+});

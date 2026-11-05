@@ -53,6 +53,7 @@ import { ReadAlongHighlighter } from "./ReadAlongHighlighter";
 import { useReadingActions } from "./reading-actions-context";
 import {
   collectSpeakableText,
+  wordIndexForRangeStart,
   wordIndexFromPoint,
   type SpeakableText,
 } from "@/lib/reading-speakable-text";
@@ -528,7 +529,14 @@ export function TextUnitView({
     // NaturalReader behaviour: a selection is read out immediately, on its own,
     // and stops at its end rather than continuing into the page. Annotations and
     // the companion still receive the selection as before.
-    sharedActions?.speakSelection(quote);
+    //
+    // The highlight is driven by an index into the *page's* words, so the
+    // selection has to say where it starts on the page — otherwise word 1 of the
+    // selection paints word 1 of the document, and a selection three paragraphs
+    // down highlights near the top of the page.
+    const model = speakableRef.current;
+    const base = model ? wordIndexForRangeStart(model, range) : 0;
+    sharedActions?.speakSelection(quote, base);
   }, [locator, onSelection, sharedActions, text]);
 
   const canPrev = locator > 1;
