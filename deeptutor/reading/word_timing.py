@@ -128,35 +128,114 @@ def _normalize_word(token: str) -> str:
     return re.sub(r"[^\w']+", "", token.translate(_QUOTE_FOLD)).casefold()
 
 
-def _candidate_forms(token: str) -> list[str]:
-    """Normalised spellings a token may appear as in the spoken token stream."""
-    # Inspect the decimal *before* stripping punctuation: the plain normaliser
-    # collapses "2.0" to "20", which would then be read as "twenty".
+_DIGIT_WORDS = {
+    "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+    "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+}
+
+
+def _squash(value: str) -> str:
+    """Letters and digits only.
+
+    Voices punctuate as they please: Kokoro says "seventy-eight" with a hyphen
+    and "freelancer's" with one, while the page has "78" and "freelancer’s".
+    Comparing on letters and digits alone makes those the same word, and it also
+    lets several spoken words match one page token once concatenated.
+    """
+    return re.sub(r"[^0-9a-z]+", "", value.translate(_QUOTE_FOLD).casefold())
+
+
+def _decimal_words(digits: str) -> str:
+    """A decimal as a voice says it: "0.05" -> "zero point zero five"."""
+    return "point " + " ".join(_DIGIT_WORDS.get(digit, digit) for digit in digits)
+
+
+def _candidate_forms(token: str) -> set[str]:
+    """Every squashed spelling a page token may appear as in the spoken stream.
+
+    Voices do not read the source verbatim, so a token is matched against all the
+    plausible ways it could be pronounced rather than against its literal text.
+    """
     trimmed = token.strip()
-    decimal = re.match(r"^(\d+)\.(\d+)$", trimmed)
-    base = _normalize_word(token)
-    if not base:
-        return []
-    forms = [base]
-    head = decimal
-    if head and head.group(2).strip("0") == "":
-        # A version-style decimal: Kokoro reads "2.0" as "two", not "twenty".
-        whole = _number_words(head.group(1))
+    forms: set[str] = set()
+
+    raw = _squash(trimmed)
+    if raw:
+        forms.add(raw)
+
+    # "78," and "$12." are the same number as "78" and "$12"; only the sentence
+    # punctuation differs, and the voice never says it.
+    cleaned = trimmed.strip("\"'\u201c\u201d\u2018\u2019()[]{}").rstrip(".,;:!?")
+
+    number = re.match(r"^(\d[\d,]*)(?:\.(\d+))?$", cleaned)
+    if number:
+        whole = _number_words(number.group(1))
+        fraction = number.group(2)
+        if fraction:
+            # "1.2" is "one point two", four words in all. The bare leading word
+            # is *not* offered as a form: "0.05" heard as "zero" would match one
+            # word and leave "point zero five" to derail the next real word.
+            forms.add(_squash(" ".join(whole) + " " + _decimal_words(fraction)))
+            if fraction.strip("0") == "":
+                # Version-style "2.0" is just "two" (or "two point").
+                forms.add(_squash(" ".join(whole) + " point"))
+                forms.add(_squash(" ".join(whole)))
+        elif whole:
+            forms.add(_squash(" ".join(whole)))
+
+    # "15%" is read "fifteen percent", "$12" as "twelve dollars".
+    percent = re.match(r"^(\d[\d,]*)\s*%$", cleaned)
+    if percent:
+        whole = _number_words(percent.group(1))
         if whole:
-            forms.append(" ".join(whole))
-    elif head:
-        # A real decimal: "1.2" is read "one point two". The page token has to
-        # account for the leading words it will hear.
-        whole = _number_words(head.group(1))
-        if whole:
-            forms.append(" ".join(whole))
-    else:
-        plain = re.match(r"^(\d+)$", base)
-        if plain:
-            whole = _number_words(plain.group(1))
-            if whole:
-                forms.append(" ".join(whole))
-    return [form for form in forms if form]
+            forms.add(_squash(" ".join(whole) + " percent"))
+    money = re.match(r"^\$\s*(\d[\d,]*(?:\.\d+)?)$", cleaned)
+    if money:
+        for form in list(_candidate_forms(money.group(1))):
+            forms.add(form)
+            forms.add(form + "dollars")
+
+    return {form for form in forms if form}
+
+
+# A page token can be spoken as several words: "0.05" is four ("zero point zero
+# five"), a long numeral more. Matching looks ahead this far.
+_MAX_SPOKEN_PER_TOKEN = 12
+# How far to look either side to resynchronise when a token has no counterpart.
+_MAX_SKIP = 4
+
+
+def _spread_unspoken_runs(words: list[TimedWord]) -> list[TimedWord]:
+    """Give a run of unspoken words its own moments instead of one frozen instant.
+
+    When the voice skips a stretch — a table column it reads elsewhere, a header
+    it never voices — every skipped word falls back to the last known position,
+    so the highlight sits still while audio plays on. Spreading those words
+    across the gap keeps the cursor moving at roughly reading pace until it
+    catches the voice again.
+    """
+    index = 0
+    total = len(words)
+    while index < total:
+        end = index
+        while end + 1 < total and words[end + 1].start == words[index].start:
+            end += 1
+        if end > index and end + 1 < total:
+            start = words[index].start
+            following = words[end + 1].start
+            span = following - start
+            count = end - index + 1
+            # Only worth doing when the voice really did leave a gap; adjacent
+            # words sharing an instant are punctuation, not a skipped passage.
+            if span > 0.25:
+                step = span / (count + 1)
+                for offset in range(1, count):
+                    word = words[index + offset]
+                    words[index + offset] = TimedWord(
+                        word.word, start + step * offset, word.duration
+                    )
+        index = end + 1
+    return words
 
 
 def align_words_to_text(
@@ -164,13 +243,16 @@ def align_words_to_text(
 ) -> list[TimedWord]:
     """Project TTS boundary strings onto the reader's own word tokens.
 
-    The speech engine may normalise or split words differently from the source
-    text ("$12" -> "twelve dollars", "e.g." -> "e g"). Highlighting needs one
-    entry per *visible* token, in reading order, so boundaries are matched
-    forward against the source tokens instead of being used verbatim.
+    Engines do not read source text verbatim. "78" comes back as "seventy-eight",
+    "0.05" as four words, "e.g." as "e g", "$12" as "twelve dollars". The reader
+    needs one timing per *visible* token in reading order, so rather than trusting
+    the boundaries this walks them forward and matches each run of spoken words
+    against the page token it came from, on letters and digits alone.
 
-    A boundary that cannot be matched is skipped rather than shifting every
-    later word; unmatched source tokens inherit the current playback position.
+    Matching is deliberately forgiving in both directions. An unmatched boundary
+    resumes at the next page token instead of shifting every later word, and a
+    page token the voice skips inherits the current position rather than
+    collapsing the rest of the page onto one timestamp.
     """
     tokens = [
         (match.start(), match.group(0))
@@ -180,69 +262,86 @@ def align_words_to_text(
     if not tokens:
         return []
 
+    # Engines can report a first word slightly before zero (Kokoro returned
+    # -0.0028s, an artifact of its internal alignment). The API schema rejects
+    # negative starts, and because the position carries forward one negative
+    # value poisoned every preceding word too.
+    speech = [
+        (_squash(raw), max(0.0, start), max(0.0, duration))
+        for raw, start, duration in boundary_times
+    ]
+    speech = [entry for entry in speech if entry[0]]
+    if not speech:
+        return [TimedWord(word, 0.0, 0.0) for _, word in tokens]
+
+    forms = [_candidate_forms(word) for _, word in tokens]
+
+    def spoken_run(page_index: int, speech_index: int) -> int:
+        """How many spoken words this page token accounts for, longest first."""
+        candidates = forms[page_index]
+        if not candidates:
+            return 0
+        joined = ""
+        best = 0
+        for count in range(1, _MAX_SPOKEN_PER_TOKEN + 1):
+            position = speech_index + count - 1
+            if position >= len(speech):
+                break
+            joined += speech[position][0]
+            if joined in candidates:
+                # A longer run is the more specific reading ("0.05" as four
+                # words beats the bare "zero" that also fits).
+                best = count
+        return best
+
     out: list[TimedWord] = []
     cursor = 0
+    position = 0
     last_start = 0.0
-    # Spoken tokens still owed to a numeral that expanded into several words.
-    pending_skip = [0]
 
-    for raw_word, start, duration in boundary_times:
-        if pending_skip[0] > 0:
-            # This boundary belongs to a numeral already accounted for.
-            pending_skip[0] -= 1
+    while cursor < len(tokens):
+        if position >= len(speech):
+            out.append(TimedWord(tokens[cursor][1], last_start, 0.0))
+            cursor += 1
             continue
-        # Engines can report a first word slightly before zero (Kokoro returned
-        # -0.0028s, an artifact of its internal alignment). The API schema
-        # rejects negative starts, and because `last_start` is carried forward
-        # one negative value poisoned every preceding word too — the endpoint
-        # answered 500 and the reader got nothing at all.
-        start = max(0.0, start)
-        duration = max(0.0, duration)
-        wanted = _normalize_word(raw_word)
-        if not wanted:
-            continue
-        matched_at = -1
-        # How many spoken tokens this page token accounts for. A numeral expands
-        # to several words ("180" -> "one hundred eighty"), and the extra words
-        # have no page token of their own; consuming them keeps the cursor in
-        # step instead of letting them fall through as unmatched.
-        consumed = 0
-        for index in range(cursor, len(tokens)):
-            forms = _candidate_forms(tokens[index][1])
-            if not forms:
-                continue
-            # Exact normalised match, or a numeral read out ("2.0" -> "two").
-            if wanted in forms:
-                matched_at = index
-                consumed = 1
-                break
-            expanded = next((form for form in forms if " " in form), None)
-            if expanded and wanted == expanded.split()[0]:
-                matched_at = index
-                consumed = len(expanded.split())
-                break
-            # Partial match: a boundary word may span tokens ("24/7" -> 24, 7).
-            if any(wanted.startswith(form) and form for form in forms):
-                matched_at = index
-                consumed = 1
-                break
-        if matched_at < 0:
-            continue
-        for index in range(cursor, matched_at):
-            out.append(TimedWord(tokens[index][1], last_start, max(0.0, start - last_start)))
-        out.append(TimedWord(tokens[matched_at][1], start, duration))
-        last_start = start
-        cursor = matched_at + 1
-        if consumed > 1:
-            pending_skip[0] += consumed - 1
 
-    # Trailing tokens the engine never reported: hold them at the last position.
-    for index in range(cursor, len(tokens)):
-        out.append(TimedWord(tokens[index][1], last_start, 0.0))
+        consumed = spoken_run(cursor, position)
+        if consumed:
+            start, duration = speech[position][1], speech[position][2]
+            out.append(TimedWord(tokens[cursor][1], start, duration))
+            last_start = start
+            cursor += 1
+            position += consumed
+            continue
 
-    # Sort defensively so the client can walk the list monotonically.
+        # No counterpart. Either this page token is never spoken (a stray page
+        # number, a table rule) or the voice said something extra. Look a short
+        # way in each direction and resume wherever the two agree again.
+        resynced = False
+        for skip in range(1, _MAX_SKIP + 1):
+            if cursor + skip < len(tokens) and spoken_run(cursor + skip, position):
+                for index in range(cursor, cursor + skip):
+                    out.append(TimedWord(tokens[index][1], last_start, 0.0))
+                cursor += skip
+                resynced = True
+                break
+        if resynced:
+            continue
+        for skip in range(1, _MAX_SKIP + 1):
+            if position + skip < len(speech) and spoken_run(cursor, position + skip):
+                position += skip
+                resynced = True
+                break
+        if resynced:
+            continue
+
+        # Nothing agrees nearby: hold this word at the last known position.
+        out.append(TimedWord(tokens[cursor][1], last_start, 0.0))
+        cursor += 1
+        position += 1
+
     out.sort(key=lambda item: item.start)
-    return out
+    return _spread_unspoken_runs(out)
 
 
 async def synthesize_with_word_timings(

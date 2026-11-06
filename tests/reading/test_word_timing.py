@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from deeptutor.reading.word_timing import (
     TICKS_PER_SECOND,
     align_words_to_text,
@@ -233,3 +235,127 @@ def test_a_numeral_spoken_as_several_words_keeps_the_cursor_in_step() -> None:
     assert [round(word.start, 2) for word in words] == [
         0.0, 0.5, 0.8, 0.9, 1.1, 1.4
     ]
+
+
+def test_hyphenated_number_is_matched_to_its_digits() -> None:
+    """Kokoro says "78" as the single word "seventy-eight".
+
+    Normalising must not turn the voice's "seventy-eight" into "seventyeight"
+    while leaving the page's expansion as "seventy eight" — the two have to be
+    comparable, or the numeral never matches and the page loses its timing.
+    """
+    text = "Every channel decays 78 percent to 0.05 percent"
+    spoken = [
+        ("Every", 0.0, 0.1),
+        ("channel", 0.1, 0.2),
+        ("decays", 0.3, 0.2),
+        ("seventy-eight", 0.5, 0.3),
+        ("percent", 0.8, 0.2),
+        ("to", 1.0, 0.1),
+        ("zero", 1.1, 0.1),
+        ("point", 1.2, 0.1),
+        ("zero", 1.3, 0.1),
+        ("five", 1.4, 0.1),
+        ("percent", 1.5, 0.2),
+    ]
+
+    words = align_words_to_text(text, spoken)
+
+    assert [word.word for word in words] == text.split()
+    assert [round(word.start, 2) for word in words] == [
+        0.0, 0.1, 0.3, 0.5, 0.8, 1.0, 1.1, 1.5
+    ]
+
+
+def test_a_decimal_spoken_as_several_words_covers_its_whole_run() -> None:
+    """The page token "0.05" is four spoken words and must absorb all of them.
+
+    Matching only the first ("zero") would leave "point zero five" in the stream,
+    where it derails the next real word. Longest-run matching is what keeps the
+    cursor and the voice in step.
+    """
+    text = "decays to 0.05 percent"
+    spoken = [
+        ("decays", 0.0, 0.1),
+        ("to", 0.1, 0.1),
+        ("zero", 0.2, 0.1),
+        ("point", 0.3, 0.1),
+        ("zero", 0.4, 0.1),
+        ("five", 0.5, 0.1),
+        ("percent", 0.6, 0.2),
+    ]
+
+    words = align_words_to_text(text, spoken)
+
+    assert [word.word for word in words] == text.split()
+    # The whole decimal points at its first spoken word; nothing is left over.
+    assert [round(word.start, 2) for word in words] == [0.0, 0.1, 0.2, 0.6]
+
+
+def test_a_realistic_price_page_keeps_a_timing_per_word() -> None:
+    """The regression that made the deployed reader look frozen.
+
+    A page of prices and percentages came back with 76 distinct timings for 594
+    words: numerals the voice spells differently ("78" -> "seventy-eight",
+    "0.05" -> "zero point zero five") broke the match, and every later word
+    collapsed onto one timestamp. Highlighting then sat on a single word while
+    the audio played on.
+    """
+    text = (
+        "Every channel decays 78 percent to 0.05 percent in a month, "
+        "so a plan built on 2,200 free accounts at 15% cost "
+        "has to answer 4,100 questions before it pays back $12."
+    )
+    spoken: list[tuple[str, float, float]] = []
+    clock = 0.0
+
+    def say(*words: str) -> None:
+        nonlocal clock
+        for word in words:
+            spoken.append((word, clock, 0.1))
+            clock += 0.1
+
+    say("Every", "channel", "decays", "seventy-eight", "percent", "to")
+    say("zero", "point", "zero", "five", "percent", "in", "a", "month,")
+    say("so", "a", "plan", "built", "on")
+    say("two", "thousand", "two", "hundred", "free", "accounts", "at")
+    say("fifteen", "percent", "cost", "has", "to", "answer")
+    say("four", "thousand", "one", "hundred", "questions", "before")
+    say("it", "pays", "back", "twelve", "dollars.")
+
+    words = align_words_to_text(text, spoken)
+
+    assert [word.word for word in words] == text.split()
+    starts = [word.start for word in words]
+    # Every visible word has its own moment on the timeline.
+    assert len(set(starts)) >= len(words) - 1, (
+        f"only {len(set(starts))} distinct timings for {len(words)} words"
+    )
+    # ...and the timeline spans the whole recording, not its first seconds.
+    assert max(starts) == pytest.approx(clock - 0.1, abs=0.11)
+
+
+def test_a_passage_the_voice_skips_keeps_the_cursor_moving() -> None:
+    """Skipped words must not freeze the highlight on one instant.
+
+    A table column the voice reads elsewhere, or a header it never voices, leaves
+    a run of page tokens with no counterpart. Parking them all on the last known
+    timestamp made the highlight sit still for seconds at a time; they are now
+    spread across the gap at reading pace.
+    """
+    text = "before one two three four after"
+    spoken = [
+        ("before", 0.0, 0.2),
+        # "one two three four" is never said.
+        ("after", 8.0, 0.2),
+    ]
+
+    words = align_words_to_text(text, spoken)
+
+    assert [word.word for word in words] == text.split()
+    starts = [word.start for word in words]
+    # The skipped run advances instead of all sharing one moment.
+    assert len(set(starts)) == len(words)
+    assert starts[0] == 0.0
+    assert starts[-1] == 8.0
+    assert starts == sorted(starts)

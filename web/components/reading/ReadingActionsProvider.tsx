@@ -130,6 +130,10 @@ export function ReadingActionsProvider({
   // is declared further down without a circular `useCallback` dependency.
   const continueRef = useRef<(() => void) | null>(null);
   const [readAlongActive, setReadAlongActive] = useState(false);
+  // Narrating a page takes the local voice a while; until audio exists there is
+  // nothing audible and nothing to highlight, which reads as a dead button. The
+  // UI shows this as "preparing" so the wait is visible.
+  const [readAlongPreparing, setReadAlongPreparing] = useState(false);
   // The word the session should resume from when the reader re-registers after
   // a page turn; -1 means "from the top of the page".
   const resumeAtRef = useRef(0);
@@ -161,6 +165,7 @@ export function ReadingActionsProvider({
         }
         return;
       }
+      setReadAlongPreparing(true);
       const played = await speak({
         materialId,
         locator,
@@ -188,6 +193,9 @@ export function ReadingActionsProvider({
             setReadAlongActive(false);
           }
         },
+      }).finally(() => {
+        // Audio exists now (or the attempt failed); the wait is over either way.
+        if (sessionRef.current === session) setReadAlongPreparing(false);
       });
       if (!played && sessionRef.current === session) setReadAlongActive(false);
     },
@@ -214,12 +222,15 @@ export function ReadingActionsProvider({
   // see `continueReadAlong`.
   const activeRef = useRef(false);
   activeRef.current = readAlongActive;
+  const preparingRef = useRef(false);
+  preparingRef.current = readAlongPreparing;
 
   const stopReadAlong = useCallback(() => {
     sessionRef.current += 1;
     activeRef.current = false;
     pendingContinueRef.current = false;
     setReadAlongActive(false);
+    setReadAlongPreparing(false);
     stopSpeaking();
   }, [stopSpeaking]);
 
@@ -358,7 +369,8 @@ export function ReadingActionsProvider({
           // `timed` asks for per-word boundaries so the page can highlight
           // along with the voice; the hook falls back to an estimate when the
           // active voice cannot report them.
-          const played = await speak({
+          setReadAlongPreparing(true);
+      const played = await speak({
             materialId,
             locator: requestedLocator,
             locale: String(next.payload.locale || i18n.language),
@@ -403,6 +415,7 @@ export function ReadingActionsProvider({
       stopSpeaking,
       dismiss,
       readAlongActive,
+      readAlongPreparing,
       startReadAlong,
       speakSelection,
       toggleReadAlong,
@@ -418,6 +431,7 @@ export function ReadingActionsProvider({
       continueReadAlong,
       dismiss,
       readAlongActive,
+      readAlongPreparing,
       readAlongWords,
       registerReadAlongSource,
       run,

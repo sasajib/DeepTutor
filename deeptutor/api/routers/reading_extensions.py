@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import time
 import logging
 import re
 from typing import Any
@@ -24,6 +26,7 @@ from deeptutor.reading.extensions import (
     get_reading_extension_registry,
 )
 from deeptutor.services.llm.exceptions import LLMError
+from deeptutor.services.singleflight_cache import AsyncSingleFlightTTLCache
 from deeptutor.services.voice import VoiceProviderError, synthesize_speech
 from deeptutor.services.voice.audio import _parse_pcm_content_type, _pcm16_to_wav
 
@@ -35,6 +38,33 @@ router = APIRouter()
 # quiz on a reasoning model — and a timeout used to circuit-break the extension
 # for the rest of the process.
 ACTION_TIMEOUT_S = 120
+
+
+# A page of prose takes the local voice about a minute to narrate, and a reader
+# who stops, re-reads, or turns back costs the same again. Timed speech is a pure
+# function of (text, voice, speed), so the result is kept briefly: re-reading a
+# page is then instant. Small on purpose — each entry holds several megabytes of
+# audio, and the cache only ever needs the pages near the reader's position.
+_TIMED_SPEECH_CACHE_LIMIT = 8
+_TIMED_SPEECH_TTL_S = 30 * 60
+_timed_speech_cache: AsyncSingleFlightTTLCache[str, tuple[float, dict[str, Any]]] = (
+    AsyncSingleFlightTTLCache(
+        limit=_TIMED_SPEECH_CACHE_LIMIT,
+        ttl_seconds=_TIMED_SPEECH_TTL_S,
+        value_timestamp=lambda entry: entry[0],
+    )
+)
+
+
+def _timed_speech_key(
+    material_id: str, text: str, voice: str | None, speed: float | None
+) -> str:
+    digest = hashlib.sha256()
+    for part in (material_id, voice or "", repr(speed), text):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
 
 
 def _unavailable_detail(
@@ -260,22 +290,30 @@ async def read_material_aloud_timed(
 
     from deeptutor.reading.word_timing import synthesize_with_word_timings
 
-    try:
-        result = await synthesize_with_word_timings(
-            text,
-            voice=payload.voice,
-            speed=payload.speed,
-            strip_markdown=from_material,
-        )
-    except VoiceProviderError as exc:
-        logger.warning("Timed TTS provider error for %s: %s", material_id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="The speech provider is unavailable.",
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    cache_key = _timed_speech_key(material_id, text, payload.voice, payload.speed)
 
+    async def narrate() -> tuple[float, dict[str, Any]]:
+        try:
+            produced = await synthesize_with_word_timings(
+                text,
+                voice=payload.voice,
+                speed=payload.speed,
+                strip_markdown=from_material,
+            )
+        except VoiceProviderError as exc:
+            logger.warning("Timed TTS provider error for %s: %s", material_id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="The speech provider is unavailable.",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        return (time.time(), produced)
+
+    # Coalesced too: a reader who double-clicks does not pay for two narrations.
+    _, result = await _timed_speech_cache.get_or_create(cache_key, narrate)
     return WordTimedSpeechResponse(**result)
 
 

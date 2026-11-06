@@ -62,6 +62,12 @@ export interface ReadingActionsValue {
    * (NaturalReader's interaction model, as opposed to a one-shot page play).
    */
   readAlongActive: boolean;
+  /**
+   * Read-along is armed but the voice has not produced audio for this page yet.
+   * Narrating a page is not instant, and without this the pressed button looks
+   * like it did nothing.
+   */
+  readAlongPreparing: boolean;
   /** Start read-along at a word index, or resume from where it stopped. */
   startReadAlong: (fromWord?: number) => void;
   /**

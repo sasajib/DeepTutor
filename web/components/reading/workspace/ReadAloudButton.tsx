@@ -27,7 +27,10 @@ export function ReadAloudButton({ disabled }: { disabled?: boolean }) {
   const entry = shared?.actions.find((row) => row.key === READ_ALOUD_KEY);
   if (!shared || !entry || shared.ageMode !== "default") return null;
 
-  const busy = shared.busyKey === READ_ALOUD_KEY;
+  // Narrating a page takes the voice a while, and until audio exists there is
+  // nothing to hear and nothing to highlight — so the button spins rather than
+  // sitting there looking like the press was ignored.
+  const busy = shared.busyKey === READ_ALOUD_KEY || shared.readAlongPreparing;
   // The cursor stays armed between pages, so the toggle follows that rather
   // than the momentary transport state.
   const active = shared.readAlongActive || shared.speaking;
@@ -36,7 +39,9 @@ export function ReadAloudButton({ disabled }: { disabled?: boolean }) {
     <Tooltip label={label}>
       <button
         type="button"
-        disabled={disabled || busy}
+        // Stay clickable while preparing: a minute of silence must not also be
+        // a minute of not being able to cancel.
+        disabled={disabled || (busy && !active)}
         onClick={() => shared.toggleReadAlong()}
         aria-label={label}
         aria-pressed={active}
@@ -101,7 +106,9 @@ export function PageToolButtons({
             <Tooltip key={entry.key} label={entry.label}>
               <button
                 type="button"
-                disabled={disabled || busy}
+                // Stay clickable while preparing: a minute of silence must not also be
+        // a minute of not being able to cancel.
+        disabled={disabled || busy}
                 onClick={() => void shared.run(entry)}
                 aria-label={entry.label}
                 className={buttonClass}
