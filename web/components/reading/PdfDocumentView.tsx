@@ -565,7 +565,9 @@ export function PdfDocumentView({
     if (!sharedActions) return;
     sharedActions.registerReadAlongSource({
       getPage: () => {
-        refreshPageModel();
+        // Keep a page pinned by `next()`: re-deriving it from scroll position
+        // here would race that scroll and hand back the page just finished.
+        if (!pageModelRef.current) refreshPageModel();
         const model = speakableRef.current;
         if (!model) return null;
         return { text: model.text, wordCount: model.words.length };
@@ -579,6 +581,24 @@ export function PdfDocumentView({
           `[data-reader-unit="${following}"]`,
         );
         target?.scrollIntoView({ block: "start" });
+        // Pin the page we are turning to. Deciding it from scroll position races
+        // the smooth scroll: `refreshPageModel` runs before the new page has
+        // settled under the viewport, resolves the page we just finished, and
+        // read-along re-reads the same page forever — the highlight then freezes
+        // on its last word.
+        if (target) {
+          const layer = target.querySelector<HTMLElement>(".textLayer");
+          const locator = Number(target.dataset.readerUnit ?? "0");
+          // Only pin a page that already has text. An off-screen page's layer is
+          // still empty, and pinning it would hand read-along an empty model;
+          // the observer below continues once its text arrives.
+          if (layer?.textContent?.trim() && locator) {
+            pageModelRef.current = { locator, model: collectSpeakableText(layer) };
+            speakableRef.current = pageModelRef.current.model;
+            spokenPageRef.current = layer;
+            return;
+          }
+        }
         pageModelRef.current = null;
         speakableRef.current = null;
       },

@@ -21,9 +21,12 @@ describe('provider branding', () => {
     ])
     // Y-API and google-browser-scraper have no verified official brand asset;
     // retain the generic fallback.
+    // `kokoro` is a locally-hosted open-source model with no official brand
+    // asset to bundle, so it takes the generic fallback like xAI.
     const generic = new Set([
       'none', 'custom', 'custom_anthropic', 'custom_openai_sdk', 'custom_chat', 'y_api',
       'google_browser_scraper', 'xai', // No bundled verified xAI brand asset yet.
+      'kokoro', // Local server; no official mark to bundle.
     ])
     expect(ids.size).toBeGreaterThan(50)
     for (const id of ids) {

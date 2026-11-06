@@ -423,6 +423,12 @@ init_user_directories(Path('/app'))
 # `|| true`; warn and let the writability probe fail-fast if the runtime
 # user still cannot write.
 if [ "$(id -u)" -eq 0 ]; then
+    # /app/web too, and it must happen here rather than at build time: the image
+    # owns it as uid 1000, but the remap above changes that user's uid to
+    # ${PUID}. The baked ownership then points at a uid that no longer exists,
+    # Next.js cannot create its image cache, and every render logs
+    # `EACCES: mkdir /app/web/.next/cache`.
+    chown -R deeptutor:deeptutor /app/web 2>/dev/null || true
     if chown -R deeptutor:deeptutor /app/data; then
         echo "   ✅ /app/data owned by deeptutor (uid=${PUID} gid=${PGID})"
     else

@@ -86,10 +86,22 @@ function renderPdf(unitCount = 3) {
 describe("PDF read-along", () => {
   beforeEach(() => {
     registry.source = null;
+    // jsdom implements no layout, so scrolling is a no-op stub. The page turn
+    // must still land on the right page, which is the point under test.
+    Element.prototype.scrollIntoView = () => undefined;
     // jsdom has no layout: give pages a box so the visible-page probe finds one.
     Element.prototype.getBoundingClientRect = function () {
       const el = this as HTMLElement;
-      const index = [...(el.parentElement?.children ?? [])].indexOf(el);
+      // Only the page elements are laid out in a column. Everything else (the
+      // scroll host, the column wrapper) gets a viewport-sized box, or the
+      // visible-page probe computes an overlap against NaN and finds nothing.
+      if (!el.dataset.readerUnit) {
+        return {
+          top: 0, bottom: 900, left: 0, right: 600, width: 600, height: 900,
+          x: 0, y: 0, toJSON: () => ({}),
+        } as DOMRect;
+      }
+      const index = Number(el.dataset.readerUnit) - 1;
       const top = 80 + index * 900;
       return {
         top, bottom: top + 880, left: 0, right: 600, width: 600, height: 880,
@@ -138,5 +150,40 @@ describe("PDF read-along", () => {
     await waitFor(() => expect(registry.source).not.toBeNull());
     act(() => view.unmount());
     expect(registry.source).toBeNull();
+  });
+
+  it("advances to the next page without re-reading the one just finished", async () => {
+    // A page turn used to be decided by the page under the viewport. That races
+    // the scroll: `getPage` was consulted before the new page had settled, so it
+    // resolved the page that had just finished, read-along re-spoke it, and once
+    // the last word of the document was reached the highlight froze there.
+    const view = renderPdf(3);
+    await waitFor(() => expect(registry.source).not.toBeNull());
+
+    // Both pages have their text layer populated, which is the case that broke:
+    // no mutation fires to rescue it. The layers already exist (React renders
+    // one per page), so fill those rather than appending new ones.
+    const fill = (locator: number, words: string) => {
+      const pageEl = view.container.querySelector<HTMLElement>(
+        `[data-reader-unit="${locator}"]`,
+      );
+      const layer = pageEl!.querySelector<HTMLElement>(".textLayer");
+      layer!.textContent = words;
+    };
+
+    fill(1, "First page words");
+    fill(2, "Second page words");
+    await waitFor(() => expect(registry.source?.getPage()?.text).toBe("First page words"));
+
+    // Page two keeps its text through the turn.
+    fill(2, "Second page words");
+    act(() => registry.source?.next());
+    fill(2, "Second page words");
+
+    // The page read-along gets next must be the one it is turning to, without
+    // depending on the scroll having settled under the viewport.
+    await waitFor(() => {
+      expect(registry.source?.getPage()?.text).toBe("Second page words");
+    });
   });
 });
