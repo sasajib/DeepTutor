@@ -140,12 +140,14 @@ def test_alignment_does_not_collapse_on_a_realistic_passage() -> None:
     all following tokens inherit a single start.
     """
     text = "180 people paying 12 a month, out of about 2,200 who had ever created a free account."
+    # Kokoro reads British English, so "180" is "one hundred AND eighty".
     spoken = [
-        ("one", 0.0, 0.2), ("hundred", 0.2, 0.2), ("eighty", 0.4, 0.3),
+        ("one", 0.0, 0.2), ("hundred", 0.2, 0.2), ("and", 0.35, 0.1),
+        ("eighty", 0.45, 0.3),
         ("people", 0.7, 0.3), ("paying", 1.0, 0.3), ("twelve", 1.3, 0.3),
         ("a", 1.6, 0.1), ("month", 1.7, 0.3), ("out", 2.0, 0.1),
-        ("of", 2.1, 0.1), ("about", 2.2, 0.2), ("two", 2.4, 0.2),
-        ("thousand", 2.6, 0.3), ("two", 2.9, 0.2), ("hundred", 3.1, 0.3),
+        ("of", 2.1, 0.1), ("about", 2.2, 0.1), ("two", 2.3, 0.2),
+        ("thousand", 2.5, 0.3), ("two", 2.8, 0.2), ("hundred", 3.0, 0.3),
         ("who", 3.4, 0.1), ("had", 3.5, 0.1), ("ever", 3.6, 0.1),
         ("created", 3.7, 0.3), ("a", 4.0, 0.1), ("free", 4.1, 0.3),
         ("account", 4.4, 0.4),
@@ -162,7 +164,7 @@ def test_alignment_does_not_collapse_on_a_realistic_passage() -> None:
     by_word = {word.word: word.start for word in words}
     assert by_word["180"] == 0.0, by_word["180"]
     # "2,200" starts at the same instant its first spoken word ("two") does.
-    assert by_word["2,200"] == 2.2, by_word["2,200"]
+    assert by_word["2,200"] == 2.3, by_word["2,200"]
     assert by_word["people"] == 0.7, by_word["people"]
 
     # Most tokens still get their own timing; a collapse would show as many
@@ -215,6 +217,7 @@ def test_a_numeral_spoken_as_several_words_keeps_the_cursor_in_step() -> None:
     spoken = [
         ("one", 0.0, 0.1),
         ("hundred", 0.1, 0.2),
+        ("and", 0.25, 0.1),
         ("eighty", 0.3, 0.2),
         ("people", 0.5, 0.3),
         ("and", 0.8, 0.1),

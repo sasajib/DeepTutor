@@ -50,6 +50,7 @@ export function ReadAlongHighlighter({
     }
 
     registry.set(HIGHLIGHT_NAME, new HighlightCtor(range));
+    keepWordInView(range);
 
     return () => {
       registry.delete(HIGHLIGHT_NAME);
@@ -65,6 +66,44 @@ export function ReadAlongHighlighter({
   }, []);
 
   return null;
+}
+
+/**
+ * Scroll the spoken word back into view.
+ *
+ * A page of prose is taller than the viewport, so without this the voice runs on
+ * past the bottom of the screen and the highlight is invisible even though it is
+ * being painted correctly. Only the smallest movement that brings the word back
+ * is made — jumping to centre on every word would make the page twitch.
+ */
+function keepWordInView(range: Range): void {
+  const element =
+    range.startContainer.parentElement ??
+    (range.startContainer as HTMLElement | null);
+  if (!element?.scrollIntoView) return;
+
+  let rect: DOMRect | undefined;
+  try {
+    rect = range.getBoundingClientRect();
+  } catch {
+    // Detached or collapsed range: nothing to scroll to.
+    return;
+  }
+  if (!rect || (rect.width === 0 && rect.height === 0)) return;
+
+  const margin = 48;
+  const viewportTop = margin;
+  const viewportBottom = window.innerHeight - margin;
+  // Comfortably on screen already — leave the reader where they are.
+  if (rect.top >= viewportTop && rect.bottom <= viewportBottom) return;
+
+  const above = rect.top < viewportTop;
+  element.scrollIntoView({
+    // Only enough to reach the edge nearest the missing text.
+    block: above ? "start" : "end",
+    inline: "nearest",
+    behavior: "smooth",
+  });
 }
 
 type HighlightCtor = new (...ranges: Range[]) => unknown;

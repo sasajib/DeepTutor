@@ -60,18 +60,7 @@ _NUMBER_WORDS = {
 }
 
 
-def _number_words(value: str) -> list[str]:
-    """The words a voice is likely to say for a numeral in the source text.
-
-    Kokoro reads "2.0" as "two" and "180" as "one hundred eighty". Without this,
-    a numeral never matches the spoken token, the forward match desynchronises,
-    and every later word falls back to a single timestamp — the highlight then
-    sits still for the rest of the passage.
-    """
-    value = value.replace(",", "")
-    if not value.isdigit():
-        return []
-    number = int(value)
+def _words_under_100(number: int) -> list[str]:
     if number in _NUMBER_WORDS:
         return [_NUMBER_WORDS[number]]
     if number < 100:
@@ -80,13 +69,47 @@ def _number_words(value: str) -> list[str]:
         if ones and ones in _NUMBER_WORDS:
             words.append(_NUMBER_WORDS[ones])
         return words
-    if number < 1000:
-        hundreds, rest = divmod(number, 100)
-        words = [_NUMBER_WORDS[hundreds], "hundred"]
-        if rest:
-            words.extend(_number_words(str(rest)))
-        return words
     return []
+
+
+def _number_words(value: str) -> list[str]:
+    """The words a voice is likely to say for a numeral in the source text.
+
+    Voices do not read digits literally. Kokoro says "870" as "eight hundred and
+    seventy" and "58" as "fifty-eight". Without an expansion the numeral never
+    matches the spoken token, the forward match desynchronises, and every later
+    word falls back to a single timestamp — most of the page then has no timing.
+    """
+    value = value.replace(",", "").replace("\u00a0", "")
+    if not value.isdigit():
+        return []
+    number = int(value)
+    if number == 0:
+        return ["zero"]
+    if number >= 1_000_000_000:
+        return []
+
+    parts: list[str] = []
+    remaining = number
+
+    for unit, name in ((1_000_000, "million"), (1_000, "thousand")):
+        if remaining >= unit:
+            count, remaining = divmod(remaining, unit)
+            parts.extend(_number_words(str(count)))
+            parts.append(name)
+
+    if remaining >= 100:
+        hundreds, remaining = divmod(remaining, 100)
+        parts.extend([_NUMBER_WORDS[hundreds], "hundred"])
+        # British/Indian English, which Kokoro uses, says "and" before a
+        # remainder below a hundred: "eight hundred and seventy".
+        if remaining:
+            parts.append("and")
+
+    if remaining:
+        parts.extend(_words_under_100(remaining))
+
+    return parts
 
 
 # Typographic quotes and dashes that appear in real prose but never in a voice's
@@ -118,9 +141,15 @@ def _candidate_forms(token: str) -> list[str]:
     head = decimal
     if head and head.group(2).strip("0") == "":
         # A version-style decimal: Kokoro reads "2.0" as "two", not "twenty".
-        # Only whole numbers below the decimal point are voiced, so offer the
-        # leading digits as the candidate spelling.
-        forms.append(_number_words(head.group(1))[0] if _number_words(head.group(1)) else "")
+        whole = _number_words(head.group(1))
+        if whole:
+            forms.append(" ".join(whole))
+    elif head:
+        # A real decimal: "1.2" is read "one point two". The page token has to
+        # account for the leading words it will hear.
+        whole = _number_words(head.group(1))
+        if whole:
+            forms.append(" ".join(whole))
     else:
         plain = re.match(r"^(\d+)$", base)
         if plain:
