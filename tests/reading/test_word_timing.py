@@ -170,3 +170,63 @@ def test_alignment_does_not_collapse_on_a_realistic_passage() -> None:
     assert len(set(starts)) >= len(starts) - 3, [
         (word.word, word.start) for word in words
     ]
+
+
+def test_typographic_apostrophe_matches_the_spoken_word() -> None:
+    """A curly apostrophe must not break the match.
+
+    Python's `\\w` counts U+2019 as a word character, so "freelancer's"
+    normalised to "freelancers" while the voice said "freelancer's". The mismatch
+    stopped the forward cursor and cost every later word its timing: a 652-word
+    page came back with 35 distinct starts covering 44s of a 214s recording.
+    """
+    text = "the freelancer\u2019s bank statements and Mara\u2019s report"
+    boundaries = [
+        ("the", 0.0, 0.1),
+        ("freelancer's", 0.1, 0.4),
+        ("bank", 0.5, 0.2),
+        ("statements", 0.7, 0.3),
+        ("and", 1.0, 0.1),
+        ("Mara's", 1.1, 0.2),
+        ("report", 1.3, 0.3),
+    ]
+
+    words = align_words_to_text(text, boundaries)
+
+    assert [word.word for word in words] == text.split()
+    assert [round(word.start, 2) for word in words] == [
+        0.0, 0.1, 0.5, 0.7, 1.0, 1.1, 1.3
+    ]
+
+
+def test_a_numeral_spoken_as_several_words_keeps_the_cursor_in_step() -> None:
+    """"180" is said as three words; the leftovers must not hijack later words.
+
+    Only the first spoken word maps to the numeral's page token. If the other two
+    are left in the stream, they get matched against *later* page tokens that
+    happen to share a spelling — "hundred" from "one hundred eighty" steals the
+    "hundred" in "two hundred", the cursor jumps past real words, and everything
+    skipped over loses its own timing.
+
+    This is the collapse that hit a 652-word page: 650 words ended up sharing 35
+    timestamps covering 44s of a 214s recording.
+    """
+    text = "180 people and two hundred months"
+    spoken = [
+        ("one", 0.0, 0.1),
+        ("hundred", 0.1, 0.2),
+        ("eighty", 0.3, 0.2),
+        ("people", 0.5, 0.3),
+        ("and", 0.8, 0.1),
+        ("two", 0.9, 0.2),
+        ("hundred", 1.1, 0.3),
+        ("months", 1.4, 0.3),
+    ]
+
+    words = align_words_to_text(text, spoken)
+
+    assert [word.word for word in words] == text.split()
+    # Each word keeps its own moment; no shared fallback timestamps.
+    assert [round(word.start, 2) for word in words] == [
+        0.0, 0.5, 0.8, 0.9, 1.1, 1.4
+    ]

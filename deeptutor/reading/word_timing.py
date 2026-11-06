@@ -89,13 +89,29 @@ def _number_words(value: str) -> list[str]:
     return []
 
 
+# Typographic quotes and dashes that appear in real prose but never in a voice's
+# token stream. `\w` counts U+2019 as a word character in Python, so "freelancer's"
+# normalised to "freelancers" while the voice said "freelancer's" — the match
+# failed, the cursor stopped, and every later word lost its timing.
+_QUOTE_FOLD = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2032": "'",
+    "\u00b4": "'", "\u0060": "'",
+})
+
+
+def _normalize_word(token: str) -> str:
+    """The spelling a word and its spoken counterpart should agree on."""
+    return re.sub(r"[^\w']+", "", token.translate(_QUOTE_FOLD)).casefold()
+
+
 def _candidate_forms(token: str) -> list[str]:
     """Normalised spellings a token may appear as in the spoken token stream."""
     # Inspect the decimal *before* stripping punctuation: the plain normaliser
     # collapses "2.0" to "20", which would then be read as "twenty".
     trimmed = token.strip()
     decimal = re.match(r"^(\d+)\.(\d+)$", trimmed)
-    base = re.sub(r"[^\w']+", "", token).casefold()
+    base = _normalize_word(token)
     if not base:
         return []
     forms = [base]
@@ -138,8 +154,14 @@ def align_words_to_text(
     out: list[TimedWord] = []
     cursor = 0
     last_start = 0.0
+    # Spoken tokens still owed to a numeral that expanded into several words.
+    pending_skip = [0]
 
     for raw_word, start, duration in boundary_times:
+        if pending_skip[0] > 0:
+            # This boundary belongs to a numeral already accounted for.
+            pending_skip[0] -= 1
+            continue
         # Engines can report a first word slightly before zero (Kokoro returned
         # -0.0028s, an artifact of its internal alignment). The API schema
         # rejects negative starts, and because `last_start` is carried forward
@@ -147,23 +169,33 @@ def align_words_to_text(
         # answered 500 and the reader got nothing at all.
         start = max(0.0, start)
         duration = max(0.0, duration)
-        wanted = re.sub(r"[^\w']+", "", raw_word).casefold()
+        wanted = _normalize_word(raw_word)
         if not wanted:
             continue
         matched_at = -1
+        # How many spoken tokens this page token accounts for. A numeral expands
+        # to several words ("180" -> "one hundred eighty"), and the extra words
+        # have no page token of their own; consuming them keeps the cursor in
+        # step instead of letting them fall through as unmatched.
+        consumed = 0
         for index in range(cursor, len(tokens)):
             forms = _candidate_forms(tokens[index][1])
             if not forms:
                 continue
             # Exact normalised match, or a numeral read out ("2.0" -> "two").
-            if wanted in forms or any(
-                wanted == form.split()[0] for form in forms if " " in form
-            ):
+            if wanted in forms:
                 matched_at = index
+                consumed = 1
+                break
+            expanded = next((form for form in forms if " " in form), None)
+            if expanded and wanted == expanded.split()[0]:
+                matched_at = index
+                consumed = len(expanded.split())
                 break
             # Partial match: a boundary word may span tokens ("24/7" -> 24, 7).
             if any(wanted.startswith(form) and form for form in forms):
                 matched_at = index
+                consumed = 1
                 break
         if matched_at < 0:
             continue
@@ -172,6 +204,8 @@ def align_words_to_text(
         out.append(TimedWord(tokens[matched_at][1], start, duration))
         last_start = start
         cursor = matched_at + 1
+        if consumed > 1:
+            pending_skip[0] += consumed - 1
 
     # Trailing tokens the engine never reported: hold them at the last position.
     for index in range(cursor, len(tokens)):
