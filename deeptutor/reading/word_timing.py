@@ -50,6 +50,70 @@ def _ticks_to_seconds(ticks: Any) -> float:
         return 0.0
 
 
+_NUMBER_WORDS = {
+    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+    15: "fifteen", 16: "sixteen", 17: "seventeen", 18: "eighteen",
+    19: "nineteen", 20: "twenty", 30: "thirty", 40: "forty",
+    50: "fifty", 60: "sixty", 70: "seventy", 80: "eighty", 90: "ninety",
+}
+
+
+def _number_words(value: str) -> list[str]:
+    """The words a voice is likely to say for a numeral in the source text.
+
+    Kokoro reads "2.0" as "two" and "180" as "one hundred eighty". Without this,
+    a numeral never matches the spoken token, the forward match desynchronises,
+    and every later word falls back to a single timestamp — the highlight then
+    sits still for the rest of the passage.
+    """
+    value = value.replace(",", "")
+    if not value.isdigit():
+        return []
+    number = int(value)
+    if number in _NUMBER_WORDS:
+        return [_NUMBER_WORDS[number]]
+    if number < 100:
+        tens, ones = divmod(number, 10)
+        words = [_NUMBER_WORDS[tens * 10]] if tens * 10 in _NUMBER_WORDS else []
+        if ones and ones in _NUMBER_WORDS:
+            words.append(_NUMBER_WORDS[ones])
+        return words
+    if number < 1000:
+        hundreds, rest = divmod(number, 100)
+        words = [_NUMBER_WORDS[hundreds], "hundred"]
+        if rest:
+            words.extend(_number_words(str(rest)))
+        return words
+    return []
+
+
+def _candidate_forms(token: str) -> list[str]:
+    """Normalised spellings a token may appear as in the spoken token stream."""
+    # Inspect the decimal *before* stripping punctuation: the plain normaliser
+    # collapses "2.0" to "20", which would then be read as "twenty".
+    trimmed = token.strip()
+    decimal = re.match(r"^(\d+)\.(\d+)$", trimmed)
+    base = re.sub(r"[^\w']+", "", token).casefold()
+    if not base:
+        return []
+    forms = [base]
+    head = decimal
+    if head and head.group(2).strip("0") == "":
+        # A version-style decimal: Kokoro reads "2.0" as "two", not "twenty".
+        # Only whole numbers below the decimal point are voiced, so offer the
+        # leading digits as the candidate spelling.
+        forms.append(_number_words(head.group(1))[0] if _number_words(head.group(1)) else "")
+    else:
+        plain = re.match(r"^(\d+)$", base)
+        if plain:
+            whole = _number_words(plain.group(1))
+            if whole:
+                forms.append(" ".join(whole))
+    return [form for form in forms if form]
+
+
 def align_words_to_text(
     text: str, boundary_times: list[tuple[str, float, float]]
 ) -> list[TimedWord]:
@@ -88,12 +152,17 @@ def align_words_to_text(
             continue
         matched_at = -1
         for index in range(cursor, len(tokens)):
-            candidate = re.sub(r"[^\w']+", "", tokens[index][1]).casefold()
-            if candidate == wanted:
+            forms = _candidate_forms(tokens[index][1])
+            if not forms:
+                continue
+            # Exact normalised match, or a numeral read out ("2.0" -> "two").
+            if wanted in forms or any(
+                wanted == form.split()[0] for form in forms if " " in form
+            ):
                 matched_at = index
                 break
             # Partial match: a boundary word may span tokens ("24/7" -> 24, 7).
-            if wanted.startswith(candidate) and candidate:
+            if any(wanted.startswith(form) and form for form in forms):
                 matched_at = index
                 break
         if matched_at < 0:
