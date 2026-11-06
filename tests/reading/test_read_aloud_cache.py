@@ -76,3 +76,42 @@ def test_the_key_distinguishes_voice_speed_and_text() -> None:
 def test_the_cache_is_bounded() -> None:
     """Each entry holds megabytes of audio, so it must not grow without limit."""
     assert reading_extensions._timed_speech_cache.limit <= 32
+
+
+def test_a_prefetched_page_serves_the_readers_own_text_instantly() -> None:
+    """The reader sends rendered text, so a prefetched page must be re-projected.
+
+    Narrating ahead is keyed on position, but the words handed back have to be
+    the ones the reader is rendering — its text differs from the stored unit by
+    whitespace. Re-aligning the cached boundaries costs microseconds; narrating
+    again costs a minute.
+    """
+    stored = {
+        "audio_base64": "YXVkaW8=",
+        "mime": "audio/mpeg",
+        "words": [],
+        "timed": True,
+        # "the cost" as the voice said it.
+        "boundaries": [["the", 0.0, 0.1], ["cost", 0.1, 0.2]],
+    }
+
+    rendered = "the  cost"  # same words, different whitespace
+    result = reading_extensions._reproject(stored, rendered)
+
+    assert result["audio_base64"] == "YXVkaW8="
+    assert [entry["word"] for entry in result["words"]] == ["the", "cost"]
+    assert [entry["start"] for entry in result["words"]] == [0.0, 0.1]
+    # The client never receives the internal boundary list.
+    assert "boundaries" not in result
+
+
+def test_the_response_never_leaks_internal_boundaries() -> None:
+    produced = {
+        "audio_base64": "YXVkaW8=",
+        "mime": "audio/mpeg",
+        "words": [{"word": "x", "start": 0.0, "duration": 0.1}],
+        "timed": True,
+        "boundaries": [["x", 0.0, 0.1]],
+    }
+
+    assert "boundaries" not in reading_extensions._without_boundaries(produced)

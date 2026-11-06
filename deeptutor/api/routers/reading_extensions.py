@@ -56,6 +56,116 @@ _timed_speech_cache: AsyncSingleFlightTTLCache[str, tuple[float, dict[str, Any]]
 )
 
 
+# Narrated pages, keyed by position rather than by text. The reader speaks the
+# article as it renders, which differs from the stored unit by whitespace; keying
+# on position lets a page narrated ahead of time be re-projected onto whatever
+# exact words the reader sends, without narrating it twice.
+_BOUNDARY_CACHE_LIMIT = 4
+_BOUNDARY_TTL_S = 30 * 60
+_boundary_cache: AsyncSingleFlightTTLCache[str, tuple[float, dict[str, Any]]] = (
+    AsyncSingleFlightTTLCache(
+        limit=_BOUNDARY_CACHE_LIMIT,
+        ttl_seconds=_BOUNDARY_TTL_S,
+        value_timestamp=lambda entry: entry[0],
+    )
+)
+
+# Background narrations started ahead of the reader. Held so the task is not
+# garbage collected mid-flight.
+_PREFETCH_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _locator_key(
+    material_id: str, locator: int, voice: str | None, speed: float | None
+) -> str:
+    return f"{material_id}|{locator}|{voice or ''}|{speed!r}"
+
+
+def _without_boundaries(result: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in result.items() if key != "boundaries"}
+
+
+def _reproject(result: dict[str, Any], text: str) -> dict[str, Any]:
+    """Re-align cached audio to the exact words the reader is rendering."""
+    boundaries = result.get("boundaries") or []
+    if not boundaries:
+        return _without_boundaries(result)
+    from deeptutor.reading.word_timing import align_words_to_text
+
+    words = align_words_to_text(
+        text, [(str(w), float(s), float(d)) for w, s, d in boundaries]
+    )
+    return {
+        "audio_base64": result.get("audio_base64", ""),
+        "mime": result.get("mime", "audio/mpeg"),
+        "words": [word.as_dict() for word in words],
+        "timed": bool(words),
+    }
+
+
+def _unit_text_or_empty(material_id: str, locator: int) -> str:
+    try:
+        return ReadingStore().unit_text(material_id, locator)
+    except Exception:  # noqa: BLE001 - past the end of the document, or gone
+        return ""
+
+
+async def _narrate_unit(
+    material_id: str, text: str, voice: str | None, speed: float | None
+) -> tuple[float, dict[str, Any]]:
+    from deeptutor.reading.word_timing import synthesize_with_word_timings
+
+    try:
+        produced = await synthesize_with_word_timings(
+            text, voice=voice, speed=speed, strip_markdown=True
+        )
+    except VoiceProviderError as exc:
+        logger.warning("Timed TTS provider error for %s: %s", material_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The speech provider is unavailable.",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return (time.time(), produced)
+
+
+def _prefetch_next_page(
+    material_id: str, locator: int, voice: str | None, speed: float | None
+) -> None:
+    """Narrate the following page while this one is being listened to.
+
+    A page takes the local voice about a minute to narrate and the reader listens
+    to the previous one for three, so doing the next one now makes the page turn
+    immediate. If the reader stops before reaching it the work is wasted, but it
+    is only CPU — never a wrong answer.
+    """
+    key = _locator_key(material_id, locator + 1, voice, speed)
+    if _boundary_cache.recall(key) is not None:
+        return
+
+    async def run() -> None:
+        try:
+            text = _unit_text_or_empty(material_id, locator + 1)
+            if not text:
+                return
+            _boundary_cache.remember(
+                key, await _narrate_unit(material_id, text, voice, speed)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a prefetch must never surface
+            logger.debug(
+                "Read-aloud prefetch failed for %s", material_id, exc_info=True
+            )
+
+    task = asyncio.ensure_future(run())
+    _PREFETCH_TASKS.add(task)
+    task.add_done_callback(_PREFETCH_TASKS.discard)
+
+
 def _timed_speech_key(
     material_id: str, text: str, voice: str | None, speed: float | None
 ) -> str:
@@ -290,6 +400,24 @@ async def read_material_aloud_timed(
 
     from deeptutor.reading.word_timing import synthesize_with_word_timings
 
+    locator_key = (
+        _locator_key(material_id, payload.locator, payload.voice, payload.speed)
+        if payload.locator is not None
+        else ""
+    )
+
+    # A page narrated ahead of time (or earlier in this session) is already in
+    # hand: only the word projection depends on the reader's exact text.
+    if locator_key:
+        prepared = _boundary_cache.recall(locator_key)
+        if prepared is not None:
+            # Keep the chain going: this page was prefetched while the previous
+            # one played, so prepare the page after it in turn.
+            _prefetch_next_page(
+                material_id, payload.locator, payload.voice, payload.speed
+            )
+            return WordTimedSpeechResponse(**_reproject(prepared[1], text))
+
     cache_key = _timed_speech_key(material_id, text, payload.voice, payload.speed)
 
     async def narrate() -> tuple[float, dict[str, Any]]:
@@ -314,7 +442,18 @@ async def read_material_aloud_timed(
 
     # Coalesced too: a reader who double-clicks does not pay for two narrations.
     _, result = await _timed_speech_cache.get_or_create(cache_key, narrate)
-    return WordTimedSpeechResponse(**result)
+
+    if locator_key and result.get("boundaries"):
+        _boundary_cache.remember(locator_key, (time.time(), result))
+
+    # The reader always sends its rendered text, so this cannot key off
+    # `from_material` — a position is all that is needed to know the successor.
+    if payload.locator is not None:
+        _prefetch_next_page(
+            material_id, payload.locator, payload.voice, payload.speed
+        )
+
+    return WordTimedSpeechResponse(**_without_boundaries(result))
 
 
 @router.post("/materials/{material_id}/extensions/{extension_id}/actions/{action}")

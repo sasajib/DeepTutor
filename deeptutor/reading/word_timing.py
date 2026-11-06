@@ -463,6 +463,10 @@ async def synthesize_with_word_timings(
             "mime": kokoro_type,
             "words": [word.as_dict() for word in words],
             "timed": bool(words),
+            # Kept for the transport layer, which caches these so a page narrated
+            # ahead of the reader can be re-projected onto the exact words the
+            # reader renders without paying to narrate it again.
+            "boundaries": [list(entry) for entry in boundaries],
         }
 
     # Any other configured provider: plain audio, no timings.
