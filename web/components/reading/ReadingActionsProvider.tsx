@@ -134,6 +134,14 @@ export function ReadingActionsProvider({
   // nothing audible and nothing to highlight, which reads as a dead button. The
   // UI shows this as "preparing" so the wait is visible.
   const [readAlongPreparing, setReadAlongPreparing] = useState(false);
+  // How long a page turn may wait for the new page's text to appear.
+  const PAGE_WAIT_ATTEMPTS = 40;
+  const PAGE_WAIT_MS = 150;
+  // Pages in a row that were turned past without being readable. Without a cap,
+  // a document whose pages never populate would be walked to the end silently.
+  const MAX_SKIPPED_PAGES = 8;
+  const pageWaitRef = useRef(0);
+  const skippedPagesRef = useRef(0);
   // The word the session should resume from when the reader re-registers after
   // a page turn; -1 means "from the top of the page".
   const resumeAtRef = useRef(0);
@@ -164,7 +172,32 @@ export function ReadingActionsProvider({
     async (fromWord: number, session: number) => {
       const source = sourceRef.current;
       const page = source?.getPage();
-      if (!source || !page || !materialId) return;
+      if (!source || !materialId) return;
+      if (!page) {
+        // A page turn hands over before the new page has any text to read: the
+        // PDF renderer fills a layer only once it is laid out. Waiting briefly
+        // keeps the reading going instead of stopping dead on a blank page.
+        if (pageWaitRef.current < PAGE_WAIT_ATTEMPTS) {
+          pageWaitRef.current += 1;
+          window.setTimeout(() => {
+            if (sessionRef.current === session) void speakPage(fromWord, session);
+          }, PAGE_WAIT_MS);
+          return;
+        }
+        // Still nothing: step past it rather than leaving read-along armed with
+        // no voice. A document that has no next page simply finishes.
+        pageWaitRef.current = 0;
+        skippedPagesRef.current += 1;
+        if (source.hasNext() && skippedPagesRef.current <= MAX_SKIPPED_PAGES) {
+          resumeAtRef.current = 0;
+          source.next();
+        } else {
+          skippedPagesRef.current = 0;
+          setReadAlongActive(false);
+        }
+        return;
+      }
+      pageWaitRef.current = 0;
       // `getPage` returns the page's plain text; slice from the requested word.
       const words = page.text.split(/\s+/).filter(Boolean);
       // Starting at or past the last word means "carry on into the next page"
@@ -218,20 +251,57 @@ export function ReadingActionsProvider({
     [i18n.language, locator, materialId, speak],
   );
 
+  // Wait for a turned-to page to have text before speaking it. The renderer fills
+  // a page's text layer only once it is laid out, so for a moment after a turn
+  // there is nothing to read; giving up there is what left read-along armed and
+  // silent with no highlight on screen.
+  const beginSpeaking = useCallback(
+    async (fromWord: number, session: number) => {
+      const source = sourceRef.current;
+      if (!source) return;
+      if (!source.getPage()) {
+        if (pageWaitRef.current < PAGE_WAIT_ATTEMPTS) {
+          pageWaitRef.current += 1;
+          window.setTimeout(() => {
+            if (sessionRef.current === session) void beginSpeaking(fromWord, session);
+          }, PAGE_WAIT_MS);
+          return;
+        }
+        pageWaitRef.current = 0;
+        skippedPagesRef.current += 1;
+        if (source.hasNext() && skippedPagesRef.current <= MAX_SKIPPED_PAGES) {
+          resumeAtRef.current = 0;
+          source.next();
+          // Try again on the page we turned to: the observer only fires when a
+          // text layer actually changes, which a blank page never does.
+          window.setTimeout(() => {
+            if (sessionRef.current === session) void beginSpeaking(0, session);
+          }, PAGE_WAIT_MS);
+        } else {
+          skippedPagesRef.current = 0;
+          setReadAlongActive(false);
+        }
+        return;
+      }
+      pageWaitRef.current = 0;
+      skippedPagesRef.current = 0;
+      await speakPage(fromWord, session);
+    },
+    [speakPage],
+  );
+
   const startReadAlong = useCallback(
     (fromWord?: number) => {
       const source = sourceRef.current;
       if (!source || !materialId) return;
-      const page = source.getPage();
-      if (!page) return;
       const session = ++sessionRef.current;
       activeRef.current = true;
       setReadAlongActive(true);
       const target = fromWord ?? resumeAtRef.current;
       resumeAtRef.current = 0;
-      void speakPage(target, session);
+      void beginSpeaking(target, session);
     },
-    [materialId, speakPage],
+    [beginSpeaking, materialId],
   );
 
   // Mirror of `readAlongActive` for callbacks that must not change identity —
@@ -385,7 +455,7 @@ export function ReadingActionsProvider({
           // `timed` asks for per-word boundaries so the page can highlight
           // along with the voice; the hook falls back to an estimate when the
           // active voice cannot report them.
-          setReadAlongPreparing(true);
+      setReadAlongPreparing(true);
       const played = await speak({
             materialId,
             locator: requestedLocator,

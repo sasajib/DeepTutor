@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import { useReadingActions } from "@/components/reading/reading-actions-context";
 import {
@@ -9,6 +9,15 @@ import {
 } from "@/lib/reading-speakable-text";
 
 const HIGHLIGHT_NAME = "reading-readalong";
+
+/**
+ * Which mounted highlighter currently owns the painted word.
+ *
+ * The PDF reader and the plain-text reader each mount one, and the registry name
+ * is global — so without this the hidden instance's cleanup deletes the visible
+ * one's highlight, and the word on screen stops being marked at all.
+ */
+let highlightOwner: object | null = null;
 
 /**
  * Read-along highlight: tints the word currently being spoken.
@@ -34,12 +43,14 @@ export function ReadAlongHighlighter({
   // The word being spoken, kept so the header can take the reader to it on
   // demand — the cursor is not always on the page they are looking at.
   const rangeRef = useRef<Range | null>(null);
+  // A stable identity for this mount, so cleanup only removes its own paint.
+  const instance = useMemo(() => ({}), []);
 
   useEffect(() => {
     const registry = getHighlightRegistry();
     const root = containerRef.current;
     if (!registry || !root || activeWord < 0 || !words?.length) {
-      registry?.delete(HIGHLIGHT_NAME);
+      clearHighlight(registry, instance);
       return;
     }
 
@@ -48,18 +59,19 @@ export function ReadAlongHighlighter({
     // index N means the same word in both directions.
     const range = rangeForWordIndex(collectSpeakableText(root), activeWord);
     if (!HighlightCtor || !range) {
-      registry.delete(HIGHLIGHT_NAME);
+      clearHighlight(registry, instance);
       return;
     }
 
     registry.set(HIGHLIGHT_NAME, new HighlightCtor(range));
+    highlightOwner = instance;
     rangeRef.current = range;
     keepWordInView(range);
 
     return () => {
-      registry.delete(HIGHLIGHT_NAME);
+      clearHighlight(registry, instance);
     };
-  }, [activeWord, containerRef, words]);
+  }, [activeWord, containerRef, instance, words]);
 
   // Let the reader's toolbar bring them back to the spoken word. Read-along can
   // be well ahead of — or behind — the page on screen, so "where am I?" needs an
@@ -75,11 +87,21 @@ export function ReadAlongHighlighter({
   useEffect(() => {
     const registry = getHighlightRegistry();
     return () => {
-      registry?.delete(HIGHLIGHT_NAME);
+      clearHighlight(registry, instance);
     };
-  }, []);
+  }, [instance]);
 
   return null;
+}
+
+/** Remove the word only if this instance is the one that painted it. */
+function clearHighlight(
+  registry: HighlightRegistry | null,
+  instance: object,
+): void {
+  if (!registry || highlightOwner !== instance) return;
+  registry.delete(HIGHLIGHT_NAME);
+  highlightOwner = null;
 }
 
 /** The element a range's opening mark sits in. */

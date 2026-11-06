@@ -561,13 +561,24 @@ export function PdfDocumentView({
 
   // Publish the page to the read-along session. `next` turns to the following
   // page the same way a scroll or the pager would.
+  //
+  // Registering is deliberately tied to the stable register callback only. Keying
+  // it on the actions object re-ran this on every word of the narration — the
+  // object is rebuilt as the cursor moves — so the source was unregistered and
+  // re-registered several times a second, and a page turn landing in that gap
+  // found no source at all and stopped reading dead.
+  const registerSource = sharedActions?.registerReadAlongSource;
+  const refreshRef = useRef(refreshPageModel);
   useEffect(() => {
-    if (!sharedActions) return;
-    sharedActions.registerReadAlongSource({
+    refreshRef.current = refreshPageModel;
+  }, [refreshPageModel]);
+  useEffect(() => {
+    if (!registerSource) return;
+    registerSource({
       getPage: () => {
         // Keep a page pinned by `next()`: re-deriving it from scroll position
         // here would race that scroll and hand back the page just finished.
-        if (!pageModelRef.current) refreshPageModel();
+        if (!pageModelRef.current) refreshRef.current();
         const model = speakableRef.current;
         if (!model) return null;
         return { text: model.text, wordCount: model.words.length };
@@ -603,8 +614,8 @@ export function PdfDocumentView({
         speakableRef.current = null;
       },
     });
-    return () => sharedActions.registerReadAlongSource(null);
-  }, [refreshPageModel, sharedActions, unitCount]);
+    return () => registerSource(null);
+  }, [registerSource, unitCount]);
 
   // When a page's text layer finishes populating, tell read-along the page is
   // ready so an in-flight session can continue on it.

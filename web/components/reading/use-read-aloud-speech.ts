@@ -92,8 +92,15 @@ export function useReadAloudSpeech() {
       token: number,
       base: number,
     ) => {
+      // The list actually being driven. When the server could not report exact
+      // word boundaries this becomes an estimate over the audio's duration — and
+      // the timeupdate handler below must search *that* list. Searching the empty
+      // exact list meant `activeWord` stayed at -1 for the whole page, so the
+      // highlight was cleared and never came back while the voice read on.
+      let driving: SpokenWord[] = words;
       const apply = (resolved: SpokenWord[]) => {
         if (tokenRef.current !== token || playbackRef.current?.audio !== audio) return;
+        driving = resolved;
         setTimeline(resolved);
         // `base` shifts a mid-page start back onto the page's own numbering.
         setActiveWord(resolved.length ? base : -1);
@@ -115,12 +122,13 @@ export function useReadAloudSpeech() {
         if (tokenRef.current !== token || playbackRef.current?.audio !== audio) return;
         const t = audio.currentTime;
         // Binary search for the last word that starts at or before `t`.
+        const timeline = driving;
         let lo = 0;
-        let hi = words.length - 1;
+        let hi = timeline.length - 1;
         let found = -1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
-          if (words[mid].start <= t) {
+          if (timeline[mid].start <= t) {
             found = mid;
             lo = mid + 1;
           } else {
