@@ -85,8 +85,31 @@ def _without_boundaries(result: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in result.items() if key != "boundaries"}
 
 
-def _reproject(result: dict[str, Any], text: str) -> dict[str, Any]:
-    """Re-align cached audio to the exact words the reader is rendering."""
+def _collapsed(result: dict[str, Any]) -> bool:
+    """True when the timing map cannot be right for the words it describes.
+
+    A voice can come back with part of a narration — a truncated stream under
+    load — and then the projection onto the page's words collapses: hundreds of
+    words share one timestamp and the highlight sits still for the whole page.
+    Screen-wide agreement (fewer than half the words with their own moment) is not
+    something real speech produces, so it is treated as a failed narration.
+    """
+    words = result.get("words") or []
+    if len(words) <= 8:
+        return False
+    starts = {word.get("start") for word in words}
+    return len(starts) < len(words) * 0.5
+
+
+def _reproject(result: dict[str, Any], text: str) -> dict[str, Any] | None:
+    """Re-align cached audio to the exact words the reader is rendering.
+
+    Returns ``None`` when the cached boundaries plainly do not belong to ``text``.
+    They are stored per position, and the reader's page and its reported position
+    can disagree for a moment during a page turn; trusting the pair then aligns a
+    page against another page's narration and every word collapses onto one
+    timestamp, freezing the highlight. Re-narrating is the safe answer.
+    """
     boundaries = result.get("boundaries") or []
     if not boundaries:
         return _without_boundaries(result)
@@ -95,6 +118,9 @@ def _reproject(result: dict[str, Any], text: str) -> dict[str, Any]:
     words = align_words_to_text(
         text, [(str(w), float(s), float(d)) for w, s, d in boundaries]
     )
+    if len(words) > 8 and len({word.start for word in words}) < len(words) * 0.5:
+        logger.debug("Read-aloud cache does not match the page; narrating again")
+        return None
     return {
         "audio_base64": result.get("audio_base64", ""),
         "mime": result.get("mime", "audio/mpeg"),
@@ -151,9 +177,9 @@ def _prefetch_next_page(
             text = _unit_text_or_empty(material_id, locator + 1)
             if not text:
                 return
-            _boundary_cache.remember(
-                key, await _narrate_unit(material_id, text, voice, speed)
-            )
+            produced = await _narrate_unit(material_id, text, voice, speed)
+            if not _collapsed(produced[1]):
+                _boundary_cache.remember(key, produced)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a prefetch must never surface
@@ -411,12 +437,16 @@ async def read_material_aloud_timed(
     if locator_key:
         prepared = _boundary_cache.recall(locator_key)
         if prepared is not None:
-            # Keep the chain going: this page was prefetched while the previous
-            # one played, so prepare the page after it in turn.
-            _prefetch_next_page(
-                material_id, payload.locator, payload.voice, payload.speed
-            )
-            return WordTimedSpeechResponse(**_reproject(prepared[1], text))
+            projected = _reproject(prepared[1], text)
+            if projected is not None:
+                # Keep the chain going: this page was prefetched while the
+                # previous one played, so prepare the page after it in turn.
+                _prefetch_next_page(
+                    material_id, payload.locator, payload.voice, payload.speed
+                )
+                return WordTimedSpeechResponse(**projected)
+            # Stale pairing: drop it rather than serve a frozen highlight.
+            _boundary_cache.values.pop(locator_key, None)
 
     cache_key = _timed_speech_key(material_id, text, payload.voice, payload.speed)
 
@@ -428,6 +458,24 @@ async def read_material_aloud_timed(
                 speed=payload.speed,
                 strip_markdown=from_material,
             )
+            if _collapsed(produced):
+                logger.warning(
+                    "Timed speech collapsed for %s; narrating again", material_id
+                )
+                produced = await synthesize_with_word_timings(
+                    text,
+                    voice=payload.voice,
+                    speed=payload.speed,
+                    strip_markdown=from_material,
+                )
+                if _collapsed(produced):
+                    # Better a proportional estimate than a frozen highlight: the
+                    # client advances smoothly through audio it cannot map.
+                    logger.warning(
+                        "Timed speech still collapsed for %s; using an estimate",
+                        material_id,
+                    )
+                    produced = {**produced, "words": [], "timed": False}
         except VoiceProviderError as exc:
             logger.warning("Timed TTS provider error for %s: %s", material_id, exc)
             raise HTTPException(
@@ -443,7 +491,15 @@ async def read_material_aloud_timed(
     # Coalesced too: a reader who double-clicks does not pay for two narrations.
     _, result = await _timed_speech_cache.get_or_create(cache_key, narrate)
 
-    if locator_key and result.get("boundaries"):
+    # Only a page read from the store is guaranteed to belong to its position.
+    # The reader's own text can briefly lag the position it reports during a page
+    # turn, and storing that pairing poisons the cache for that page.
+    if (
+        locator_key
+        and from_material
+        and result.get("boundaries")
+        and not _collapsed(result)
+    ):
         _boundary_cache.remember(locator_key, (time.time(), result))
 
     # The reader always sends its rendered text, so this cannot key off

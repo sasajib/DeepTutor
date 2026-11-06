@@ -1,6 +1,13 @@
 "use client";
 
-import { ListChecks, Loader2, Sparkles, Square, Volume2 } from "lucide-react";
+import {
+  ListChecks,
+  Loader2,
+  LocateFixed,
+  Sparkles,
+  Square,
+  Volume2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useReadingActions } from "@/components/reading/reading-actions-context";
@@ -36,7 +43,22 @@ export function ReadAloudButton({ disabled }: { disabled?: boolean }) {
   const active = shared.readAlongActive || shared.speaking;
   const label = active ? t("Stop reading aloud") : t("Read aloud from here");
   return (
-    <Tooltip label={label}>
+    <>
+      {/* Read-along runs ahead of the page on screen, so "where is it now?" has
+          to be one press away rather than a hunt through the document. */}
+      {active ? (
+        <Tooltip label={t("Go to reading position")}>
+          <button
+            type="button"
+            onClick={() => shared.revealReadAlong()}
+            aria-label={t("Go to reading position")}
+            className="flex size-7 shrink-0 items-center justify-center rounded-md text-[var(--primary)] transition hover:bg-[var(--muted)]"
+          >
+            <LocateFixed size={14} />
+          </button>
+        </Tooltip>
+      ) : null}
+      <Tooltip label={label}>
       <button
         type="button"
         // Stay clickable while preparing: a minute of silence must not also be
@@ -59,7 +81,8 @@ export function ReadAloudButton({ disabled }: { disabled?: boolean }) {
           <Volume2 size={14} />
         )}
       </button>
-    </Tooltip>
+      </Tooltip>
+    </>
   );
 }
 

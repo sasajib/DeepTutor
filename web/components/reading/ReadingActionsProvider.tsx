@@ -143,6 +143,22 @@ export function ReadingActionsProvider({
     sourceRef.current = source;
   }, []);
 
+  // The highlighter knows where the spoken word sits on screen; the toolbar only
+  // needs to ask for it. Several views can be mounted at once (the PDF reader and
+  // the plain-text reader), and only the visible one has a laid-out word, so ask
+  // them all rather than whichever registered last.
+  const revealersRef = useRef<Set<() => void>>(new Set());
+  const registerReadAlongReveal = useCallback((reveal: (() => void) | null) => {
+    if (!reveal) return;
+    revealersRef.current.add(reveal);
+    return () => {
+      revealersRef.current.delete(reveal);
+    };
+  }, []);
+  const revealReadAlong = useCallback(() => {
+    for (const reveal of revealersRef.current) reveal();
+  }, []);
+
   // Speak one page of the document, then hand off to the next one.
   const speakPage = useCallback(
     async (fromWord: number, session: number) => {
@@ -416,6 +432,8 @@ export function ReadingActionsProvider({
       dismiss,
       readAlongActive,
       readAlongPreparing,
+      revealReadAlong,
+      registerReadAlongReveal,
       startReadAlong,
       speakSelection,
       toggleReadAlong,
@@ -433,6 +451,8 @@ export function ReadingActionsProvider({
       readAlongActive,
       readAlongPreparing,
       readAlongWords,
+      registerReadAlongReveal,
+      revealReadAlong,
       registerReadAlongSource,
       run,
       speakSelection,

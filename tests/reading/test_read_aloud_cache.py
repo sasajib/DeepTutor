@@ -115,3 +115,64 @@ def test_the_response_never_leaks_internal_boundaries() -> None:
     }
 
     assert "boundaries" not in reading_extensions._without_boundaries(produced)
+
+
+def test_a_mismatched_cache_entry_is_rejected_rather_than_served() -> None:
+    """Position and text can disagree for a moment during a page turn.
+
+    Aligning another page's narration against this page's words collapses every
+    word onto one timestamp, and the highlight then freezes for the length of the
+    recording. The projection must refuse and let the page be narrated again.
+    """
+    # "the cost of it" as the voice said it for a different, much longer page.
+    stored = {
+        "audio_base64": "YXVkaW8=",
+        "mime": "audio/mpeg",
+        "words": [],
+        "timed": True,
+        "boundaries": [
+            ["the", 0.0, 0.1],
+            ["cost", 0.1, 0.1],
+            ["of", 0.2, 0.1],
+            ["it", 0.3, 0.1],
+        ],
+    }
+
+    # A page of unrelated words: nothing matches, so the projection is refused.
+    unrelated = " ".join(f"word{index}" for index in range(20))
+    assert reading_extensions._reproject(stored, unrelated) is None
+
+
+def test_a_matching_cache_entry_is_accepted() -> None:
+    stored = {
+        "audio_base64": "YXVkaW8=",
+        "mime": "audio/mpeg",
+        "words": [],
+        "timed": True,
+        "boundaries": [["the", 0.0, 0.1], ["cost", 0.1, 0.2]],
+    }
+
+    result = reading_extensions._reproject(stored, "the cost")
+
+    assert result is not None
+    assert [entry["start"] for entry in result["words"]] == [0.0, 0.1]
+
+
+def test_a_truncated_narration_is_recognised() -> None:
+    """A voice that returns part of a page must not be presented as timed speech.
+
+    Hundreds of words sharing one timestamp is not something real speech
+    produces; it is a truncated stream. Serving it freezes the highlight, so it is
+    detected and the page is narrated again.
+    """
+    collapsed = {
+        "words": [{"word": f"w{index}", "start": 0.0, "duration": 0.0} for index in range(50)]
+    }
+    healthy = {
+        "words": [{"word": f"w{index}", "start": float(index), "duration": 0.2} for index in range(50)]
+    }
+
+    assert reading_extensions._collapsed(collapsed) is True
+    assert reading_extensions._collapsed(healthy) is False
+    # A short page cannot be judged this way, and must not be retried forever.
+    assert reading_extensions._collapsed({"words": [{"word": "a", "start": 0.0}]}) is False

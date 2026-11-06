@@ -1,12 +1,16 @@
 import { render } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * The highlight is painted with the CSS Custom Highlight API, which jsdom does
  * not implement, so the registry is stubbed and the assertions are on the range
- * handed to it. Two behaviours matter: the right word is tinted, and a word that
- * has scrolled off screen is brought back — otherwise the voice reads on while
- * the reader sees nothing marked.
+ * handed to it.
+ *
+ * The scrolling behaviour is what these cover in depth. `scrollIntoView` on the
+ * word walks every ancestor, and when the spoken word belonged to a page far
+ * down the document it threw the reader tens of thousands of pixels away from
+ * where they were reading — so following is now bounded, and an explicit
+ * "go to reading position" action takes them there on request.
  */
 
 class FakeHighlight {
@@ -21,25 +25,27 @@ const highlights = new Map<string, FakeHighlight>();
 const state = vi.hoisted(() => ({
   activeWord: -1,
   readAlongWords: [] as { word: string; start: number; duration: number }[],
+  reveal: null as (() => void) | null,
 }));
 
 vi.mock("@/components/reading/reading-actions-context", () => ({
-  useReadingActions: () => state,
+  useReadingActions: () => ({
+    activeWord: state.activeWord,
+    readAlongWords: state.readAlongWords,
+    registerReadAlongReveal: (reveal: (() => void) | null) => {
+      state.reveal = reveal;
+    },
+  }),
 }));
 
 const { ReadAlongHighlighter } = await import(
   "@/components/reading/ReadAlongHighlighter"
 );
 
-/** A prose paragraph with a stubbed layout: top of the page starts at `top`. */
-function makeContainer(text: string, top: number): HTMLParagraphElement {
-  const element = document.createElement("p");
-  element.textContent = text;
-  element.scrollIntoView = vi.fn();
-  document.body.appendChild(element);
-  // jsdom has no layout, so ranges cannot be measured. Report the word as
-  // sitting at `top`; the component only uses this to decide whether to scroll.
-  const original = Range.prototype.getBoundingClientRect;
+const previousRect = Range.prototype.getBoundingClientRect;
+
+/** Report the highlighted word as sitting at `top` in a 1000px-tall window. */
+function wordAt(top: number) {
   Range.prototype.getBoundingClientRect = () =>
     ({
       top,
@@ -52,23 +58,39 @@ function makeContainer(text: string, top: number): HTMLParagraphElement {
       y: top,
       toJSON: () => ({}),
     }) as DOMRect;
-  element.dataset.originalRect = String(Boolean(original));
-  return element;
 }
 
-const words = (line: string) =>
-  line.split(/\s+/).map((word, index) => ({
+function mount(line: string, activeWord: number) {
+  state.readAlongWords = line.split(/\s+/).map((word, index) => ({
     word,
     start: index,
     duration: 1,
   }));
+  state.activeWord = activeWord;
+  const element = document.createElement("p");
+  element.textContent = line;
+  document.body.appendChild(element);
+  const ref = { current: element } as React.RefObject<HTMLElement | null>;
+  const view = render(<ReadAlongHighlighter containerRef={ref} />);
+  return { view, element };
+}
 
 describe("read-along highlighter", () => {
+  const scrollTo = vi.fn();
+
   beforeEach(() => {
     highlights.clear();
     state.activeWord = -1;
     state.readAlongWords = [];
+    state.reveal = null;
+    scrollTo.mockClear();
+    window.scrollTo = scrollTo as unknown as typeof window.scrollTo;
     (globalThis as unknown as { Highlight: unknown }).Highlight = FakeHighlight;
+    Object.defineProperty(window, "innerHeight", {
+      value: 1000,
+      configurable: true,
+      writable: true,
+    });
     (CSS as unknown as { highlights: unknown }).highlights = {
       set: (name: string, highlight: FakeHighlight) => highlights.set(name, highlight),
       get: (name: string) => highlights.get(name),
@@ -76,14 +98,13 @@ describe("read-along highlighter", () => {
     };
   });
 
-  it("paints the word at the active index", () => {
-    const line = "alpha beta gamma";
-    const element = makeContainer(line, 100);
-    state.readAlongWords = words(line);
-    state.activeWord = 1;
+  afterEach(() => {
+    Range.prototype.getBoundingClientRect = previousRect;
+  });
 
-    const ref = { current: element } as React.RefObject<HTMLElement | null>;
-    const view = render(<ReadAlongHighlighter containerRef={ref} />);
+  it("paints the word at the active index", () => {
+    wordAt(100);
+    const { view, element } = mount("alpha beta gamma", 1);
 
     expect(highlights.get("reading-readalong")?.ranges).toHaveLength(1);
     view.unmount();
@@ -91,47 +112,42 @@ describe("read-along highlighter", () => {
   });
 
   it("clears the highlight when no word is active", () => {
-    const line = "alpha beta gamma";
-    const element = makeContainer(line, 100);
-    state.readAlongWords = words(line);
-    state.activeWord = -1;
-
-    const ref = { current: element } as React.RefObject<HTMLElement | null>;
-    const view = render(<ReadAlongHighlighter containerRef={ref} />);
+    wordAt(100);
+    const { view, element } = mount("alpha beta gamma", -1);
 
     expect(highlights.get("reading-readalong")).toBeUndefined();
     view.unmount();
     element.remove();
   });
 
-  it("brings a word below the viewport back into view", () => {
-    const line = "alpha beta gamma";
-    const element = makeContainer(line, window.innerHeight + 2000);
-    state.readAlongWords = words(line);
-    state.activeWord = 1;
+  it("brings a word just below the fold back into view", () => {
+    wordAt(1400); // one screen down: the reader is on this page
+    const { view, element } = mount("alpha beta gamma", 1);
 
-    const ref = { current: element } as React.RefObject<HTMLElement | null>;
-    const view = render(<ReadAlongHighlighter containerRef={ref} />);
-
-    expect(element.scrollIntoView).toHaveBeenCalled();
-    // Scroll the least distance that reveals it rather than recentring.
-    expect(element.scrollIntoView).toHaveBeenCalledWith(
-      expect.objectContaining({ block: "end" }),
-    );
+    expect(scrollTo).toHaveBeenCalled();
     view.unmount();
     element.remove();
   });
 
-  it("leaves the page alone when the word is already visible", () => {
-    const line = "alpha beta gamma";
-    const element = makeContainer(line, 200);
-    state.readAlongWords = words(line);
-    state.activeWord = 1;
+  it("leaves the reader alone when the word is on a distant page", () => {
+    // This is the bug that lost the reader's place: the spoken word was on a
+    // page thirty thousand pixels away and following it moved them there.
+    wordAt(30_000);
+    const { view, element } = mount("alpha beta gamma", 1);
 
-    const ref = { current: element } as React.RefObject<HTMLElement | null>;
-    const view = render(<ReadAlongHighlighter containerRef={ref} />);
+    expect(scrollTo).not.toHaveBeenCalled();
+    view.unmount();
+    element.remove();
+  });
 
-    expect(element.scrollIntoView).not.toHaveBeenCalled();
+  it("goes to a distant word when asked, even though it does not follow", () => {
+    wordAt(30_000);
+    const { view, element } = mount("alpha beta gamma", 1);
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    state.reveal?.();
+
+    expect(scrollTo).toHaveBeenCalled();
     view.unmount();
     element.remove();
   });

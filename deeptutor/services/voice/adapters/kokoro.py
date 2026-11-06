@@ -50,7 +50,11 @@ DEFAULT_KOKORO_TIMEOUT = 120
 
 # Kokoro on CPU synthesises at roughly real time. Let a couple of requests in
 # flight, no more: beyond that the queue just grows and every caller times out.
-_MAX_CONCURRENCY = 2
+# One narration at a time. Kokoro is a CPU server, and two captioned requests at
+# once under load came back partially streamed: the audio stopped early, the word
+# timings covered only its first seconds, and the reader's highlight froze for the
+# rest of the page. Queueing costs a little latency and keeps every page correct.
+_MAX_CONCURRENCY = 1
 _slots: dict[int, asyncio.Semaphore] = {}
 
 

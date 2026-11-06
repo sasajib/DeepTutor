@@ -80,6 +80,17 @@ export interface ReadingActionsValue {
   toggleReadAlong: () => void;
   /** The reader calls this once a newly turned page has rendered. */
   continueReadAlong: () => void;
+  /**
+   * Scroll the reader to the word currently being spoken. Read-along can be on a
+   * different page from the one on screen, so "where is it reading?" needs to be
+   * answerable without hunting for the cursor.
+   */
+  revealReadAlong: () => void;
+  /**
+   * The highlighter registers how to reach the spoken word. Returns a cleanup so
+   * a view that unmounts stops being asked.
+   */
+  registerReadAlongReveal: (reveal: (() => void) | null) => (() => void) | void;
   /** Key of the action currently running, or "". */
   busyKey: string;
   run: (
