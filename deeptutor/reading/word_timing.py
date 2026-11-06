@@ -76,6 +76,13 @@ def align_words_to_text(
     last_start = 0.0
 
     for raw_word, start, duration in boundary_times:
+        # Engines can report a first word slightly before zero (Kokoro returned
+        # -0.0028s, an artifact of its internal alignment). The API schema
+        # rejects negative starts, and because `last_start` is carried forward
+        # one negative value poisoned every preceding word too — the endpoint
+        # answered 500 and the reader got nothing at all.
+        start = max(0.0, start)
+        duration = max(0.0, duration)
         wanted = re.sub(r"[^\w']+", "", raw_word).casefold()
         if not wanted:
             continue

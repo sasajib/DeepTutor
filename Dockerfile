@@ -538,6 +538,12 @@ except Exception:
 urllib.request.urlopen(f"http://localhost:{port}/health/ready", timeout=5).close()
 EOF
 
+# The frontend runs as the unprivileged `deeptutor` user, but the COPYs above
+# land root-owned and the user-creation step runs *before* them, so its chown
+# never saw these files. Next.js then cannot create its image cache and logs
+# `EACCES: permission denied, mkdir '/app/web/.next/cache'` on every render.
+RUN chown -R deeptutor:deeptutor /app/web
+
 # Expose ports
 EXPOSE 8001 3782
 

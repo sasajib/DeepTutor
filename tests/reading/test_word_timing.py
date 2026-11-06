@@ -71,3 +71,33 @@ def test_multiple_windows_per_second() -> None:
     """Offsets are ticks, not milliseconds — a 0.5 s word is 5,000,000 ticks."""
     ticks = 5_000_000
     assert ticks / TICKS_PER_SECOND == 0.5
+
+
+def test_negative_first_boundary_does_not_produce_negative_starts() -> None:
+    """A provider's first word can start a hair before zero.
+
+    Kokoro reported -0.0028s for the first word of a passage (an artifact of its
+    internal alignment). The response schema rejects negative starts, so the
+    endpoint answered 500 and nothing was read aloud at all. Because the previous
+    word's start is carried forward, one negative value also poisoned every
+    preceding word — so this must be clamped at the source, not dropped later.
+    """
+    text = "Preface 1. The product nobody"
+    boundaries = [
+        ("Preface", -0.0027916666666666923, 0.4375),
+        ("one", 0.4347083333333333, 0.7375),
+        (".", 1.1722083333333333, 0.15),
+        ("The", 1.3222083333333332, 0.1),
+        ("product", 1.4222083333333333, 0.4),
+    ]
+
+    words = align_words_to_text(text, boundaries)
+
+    assert words, "alignment produced nothing"
+    assert all(word.start >= 0 for word in words), [
+        word.as_dict() for word in words
+    ]
+    assert all(word.duration >= 0 for word in words)
+    # The words still appear in order, and the ones after the offset are intact.
+    assert [word.word for word in words] == ["Preface", "1.", "The", "product", "nobody"]
+    assert words[2].as_dict()["start"] == 1.322
